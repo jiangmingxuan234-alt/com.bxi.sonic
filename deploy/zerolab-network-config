@@ -41,6 +41,12 @@ validate_state_dir() {
             return 2
             ;;
     esac
+    case "$STATE_DIR" in
+        /run/|/tmp/|*//*|*/./*|*/../*|*/.|*/..)
+            printf 'state directory must be under /run/* or /tmp/*\n' >&2
+            return 2
+            ;;
+    esac
 }
 
 validate_reconcile_seconds() {

@@ -243,6 +243,17 @@ def test_invalid_mode_lists_only_supported_values(tmp_path):
     assert "direct or alias" in result.stderr
 
 
+def test_state_directory_rejects_parent_traversal(tmp_path):
+    fixture = make_fixture(tmp_path, mode="direct")
+    fixture.env["ZEROLAB_NETWORK_STATE_DIR"] = "/tmp/../unsafe"
+
+    result = run_helper(fixture, "start")
+
+    assert result.returncode == 2
+    assert "state directory must be under /run/* or /tmp/*" in result.stderr
+    assert commands(fixture) == []
+
+
 def test_direct_run_notifies_ready_and_stays_active(tmp_path):
     fixture = make_fixture(tmp_path, mode="direct")
     process = start_helper(fixture, "run")
