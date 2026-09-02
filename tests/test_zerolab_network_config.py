@@ -2,6 +2,7 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 import shlex
+import shutil
 import subprocess
 import time
 
@@ -36,6 +37,44 @@ def test_hardware_drop_in_keeps_network_non_blocking():
     assert "After=zerolab-network.service" in text
     assert "Requires=zerolab-network.service" not in text
     assert "ExecStart" not in text
+
+
+def test_network_unit_verifies_with_staged_helper(tmp_path):
+    systemd_analyze = shutil.which("systemd-analyze")
+    bwrap = shutil.which("bwrap")
+    if systemd_analyze is None or bwrap is None:
+        pytest.skip("systemd-analyze and bwrap are required")
+
+    staged_helper = tmp_path / "usr/local/libexec/zerolab-network-config"
+    staged_helper.parent.mkdir(parents=True)
+    shutil.copy2(HELPER, staged_helper)
+    staged_helper.chmod(0o755)
+
+    result = subprocess.run(
+        [
+            bwrap,
+            "--ro-bind",
+            "/",
+            "/",
+            "--tmpfs",
+            "/tmp",
+            "--tmpfs",
+            "/usr/local",
+            "--dir",
+            "/usr/local/libexec",
+            "--ro-bind",
+            str(staged_helper),
+            "/usr/local/libexec/zerolab-network-config",
+            systemd_analyze,
+            "verify",
+            str(ROOT / "deploy/systemd/zerolab-network.service"),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 @dataclass
