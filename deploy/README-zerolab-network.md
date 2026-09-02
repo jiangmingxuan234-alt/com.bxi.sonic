@@ -18,11 +18,23 @@ test -f "$REPO_ROOT/deploy/config/zerolab-network"
 test -f "$REPO_ROOT/deploy/systemd/zerolab-network.service"
 test -f "$REPO_ROOT/deploy/systemd/zerolab-hardware.service.d/10-network.conf"
 
-if [ -e "$BACKUP_DIR" ] || [ -L "$BACKUP_DIR" ]; then
-    printf 'BACKUP_DIR must not already exist: %s\n' "$BACKUP_DIR" >&2
+case "$BACKUP_DIR" in
+    /*)
+        ;;
+    *)
+        printf 'BACKUP_DIR must be an absolute path: %s\n' "$BACKUP_DIR" >&2
+        exit 1
+        ;;
+esac
+BACKUP_PARENT=$(dirname -- "$BACKUP_DIR")
+if ! test -d "$BACKUP_PARENT" || test -L "$BACKUP_PARENT"; then
+    printf 'BACKUP_DIR parent must be an existing non-symlink directory: %s\n' \
+        "$BACKUP_PARENT" >&2
     exit 1
 fi
-sudo install -d -m 0700 "$BACKUP_DIR"
+sudo mkdir -- "$BACKUP_DIR"
+sudo chown root:root -- "$BACKUP_DIR"
+sudo chmod 0700 -- "$BACKUP_DIR"
 sudo install -m 0600 /dev/null "$BACKUP_DIR/present"
 
 snapshot_service_state() {

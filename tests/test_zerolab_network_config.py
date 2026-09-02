@@ -58,7 +58,7 @@ def test_deployment_guide_covers_modes_safety_and_rollback():
         assert "set -Eeuo pipefail" in first_shell_block_after(marker)
 
     for required_text in [
-        'if [ -e "$BACKUP_DIR" ] || [ -L "$BACKUP_DIR" ]; then',
+        'sudo mkdir -- "$BACKUP_DIR"',
         "snapshot_service_state()",
         "systemctl is-enabled zerolab-network.service",
         "systemctl is-active zerolab-network.service",
@@ -71,6 +71,7 @@ def test_deployment_guide_covers_modes_safety_and_rollback():
         'sudo cp -a -- "$BACKUP_DIR/$backup_name" "$target_file"',
     ]:
         assert required_text in text
+    assert 'install -d -m 0700 "$BACKUP_DIR"' not in text
 
     rollback_section = text.split("## Restore the backup", maxsplit=1)[1]
     assert rollback_section.index("sudo systemctl stop zerolab-network.service") < rollback_section.index(
@@ -82,6 +83,59 @@ def test_deployment_guide_covers_modes_safety_and_rollback():
     assert rollback_section.index("sudo systemctl daemon-reload") < (
         rollback_section.index("restore_service_state")
     )
+
+
+def test_deployment_setup_refuses_existing_backup_dir_without_overwriting_manifest(
+    tmp_path,
+):
+    text = (ROOT / "deploy/README-zerolab-network.md").read_text(
+        encoding="utf-8"
+    )
+    setup_block = text.split("## Back up and install", maxsplit=1)[1].split(
+        "~~~bash", maxsplit=1
+    )[1].split("~~~", maxsplit=1)[0].split("snapshot_service_state()", maxsplit=1)[
+        0
+    ]
+    assert 'sudo mkdir -- "$BACKUP_DIR"' in setup_block
+    assert 'install -d -m 0700 "$BACKUP_DIR"' not in setup_block
+
+    repo_root = tmp_path / "repo"
+    for relative_path in [
+        "deploy/zerolab-network-config",
+        "deploy/config/zerolab-network",
+        "deploy/systemd/zerolab-network.service",
+        "deploy/systemd/zerolab-hardware.service.d/10-network.conf",
+    ]:
+        path = repo_root / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("fixture\n", encoding="utf-8")
+
+    backup_dir = tmp_path / "existing-backup"
+    backup_dir.mkdir()
+    manifest = backup_dir / "present"
+    manifest.write_text("keep-this-manifest\n", encoding="utf-8")
+    fake_sudo = tmp_path / "sudo"
+    fake_sudo.write_text('#!/bin/sh\nexec "$@"\n', encoding="utf-8")
+    fake_sudo.chmod(0o755)
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "REPO_ROOT": str(repo_root),
+            "BACKUP_DIR": str(backup_dir),
+            "PATH": f"{tmp_path}:{env['PATH']}",
+        }
+    )
+    result = subprocess.run(
+        ["bash", "-c", setup_block],
+        text=True,
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert manifest.read_text(encoding="utf-8") == "keep-this-manifest\n"
 
 
 def test_network_unit_uses_optional_config_and_notify_supervisor():
