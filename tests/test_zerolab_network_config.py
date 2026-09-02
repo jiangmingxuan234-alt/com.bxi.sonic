@@ -48,6 +48,43 @@ def test_deployment_install_restarts_an_already_active_network_service():
     assert install_block.index(restart) < install_block.rindex(active)
 
 
+def test_deployment_preserves_manual_hardware_startup():
+    text = (ROOT / "deploy/README-zerolab-network.md").read_text(
+        encoding="utf-8"
+    )
+    install_block = text.split(
+        "## Back up and install", maxsplit=1
+    )[1].split("~~~bash", maxsplit=1)[1].split("~~~", maxsplit=1)[0]
+
+    for service in [
+        "zerolab-hardware.service",
+        "ros_elf_launch.service",
+    ]:
+        for action in ["start", "enable", "enable --now"]:
+            assert f"sudo systemctl {action} {service}" not in install_block
+
+    assert "## Preserve manual hardware startup" in text
+    manual_section = text.split(
+        "## Preserve manual hardware startup", maxsplit=1
+    )[1].split("## Back up and install", maxsplit=1)[0]
+    for required_text in [
+        "zerolab-network.service=active",
+        "ros_elf_launch.service=active",
+        "zerolab-hardware.service=inactive",
+        "sudo systemctl start zerolab-hardware.service",
+        "sudo systemctl disable zerolab-hardware.service",
+        "systemctl is-enabled zerolab-hardware.service",
+    ]:
+        assert required_text in manual_section
+    assert "sudo systemctl disable --now zerolab-hardware.service" not in manual_section
+
+    network_unit = (
+        ROOT / "deploy/systemd/zerolab-network.service"
+    ).read_text(encoding="utf-8")
+    assert "zerolab-hardware.service" not in network_unit
+    assert "ros_elf_launch.service" not in network_unit
+
+
 def test_deployment_guide_covers_modes_safety_and_rollback():
     text = (ROOT / "deploy/README-zerolab-network.md").read_text(
         encoding="utf-8"

@@ -4,6 +4,52 @@ Use this guide on the robot that receives ZeroLab UDP on port 18000. The package
 
 Do this while the robot is safely supported and with an operator ready to use PD brake. Do not invent an address from another robot, test setup, or this repository.
 
+## Preserve manual hardware startup
+
+This network deployment does not install, start, or enable a hardware
+controller. It preserves the pre-ZeroLab startup policy: the tablet remote
+controller may start at boot, while the candidate hardware stack starts only
+after an operator explicitly requests it.
+
+The intended post-boot state is:
+
+```text
+zerolab-network.service=active
+ros_elf_launch.service=active
+zerolab-hardware.service=inactive
+```
+
+Robots that previously installed commit `c3a4f2e` may still have the candidate
+hardware service enabled. Perform this one-time migration only while both
+controller services and their processes are stopped:
+
+~~~bash
+set -Eeuo pipefail
+
+test "$(systemctl is-active zerolab-hardware.service 2>/dev/null || true)" != active
+test "$(systemctl is-active ros_elf_launch.service 2>/dev/null || true)" != active
+if pgrep -af \
+  '[h]ardware_elf3|[b]xi_example_py_elf3_demo|[z]erolab_source|[r]emote_controller'
+then
+    printf '%s\n' 'controller process is still running; do not change boot state' >&2
+    exit 1
+fi
+
+sudo systemctl disable zerolab-hardware.service
+test "$(systemctl is-enabled zerolab-hardware.service 2>/dev/null || true)" = disabled
+test "$(systemctl is-enabled ros_elf_launch.service)" = enabled
+test "$(systemctl is-enabled zerolab-network.service)" = enabled
+~~~
+
+The migration changes only future boot behavior; it does not use
+`disable --now` to stop a live controller and it does not mask the manual
+entry point. After the normal robot-support and emergency-stop safety checks,
+an operator can still start the candidate stack explicitly:
+
+~~~bash
+sudo systemctl start zerolab-hardware.service
+~~~
+
 ## Back up and install
 
 Set the repository and a dedicated backup destination explicitly. These are customer paths, so the parameter checks intentionally stop an incomplete copy/paste instead of guessing.
