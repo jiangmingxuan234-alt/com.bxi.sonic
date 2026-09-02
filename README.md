@@ -535,6 +535,10 @@ reference 时进入。因为可用性检查发生在 state-scoped 节点 prepare
 
 ## ZeroLab 实时遥操（ELF3 无线适配）
 
+ZeroLab receiver networking uses direct mode by default; alias mode is an
+explicit choice. The full deployment guide is
+[`deploy/README-zerolab-network.md`](deploy/README-zerolab-network.md).
+
 当前无线分支的唯一活动路由为：MotionCaptureMaster 关闭镜像；Windows sender
 `192.168.89.171` 以 50 Hz、每包 992 字节向机器人无线地址
 `192.168.88.213:18000` 发送 UDP。直接网线版本仍保留在提交 `a82e5f4`，其 Windows

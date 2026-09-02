@@ -1,0 +1,184 @@
+# ZeroLab network mode deployment
+
+Use this guide on the robot that receives ZeroLab UDP on port 18000. The packaged mode is direct: it makes no IP-address or arp_ignore changes. Choose alias only when the customer has explicitly assigned an additional receiver IPv4 address and interfaces.
+
+Do this while the robot is safely supported and with an operator ready to use PD brake. Do not invent an address from another robot, test setup, or this repository.
+
+## Back up and install
+
+Set the repository and a dedicated backup destination explicitly. These are customer paths, so the parameter checks intentionally stop an incomplete copy/paste instead of guessing.
+
+~~~bash
+REPO_ROOT=${REPO_ROOT:?Set REPO_ROOT to this checked-out repository}
+BACKUP_DIR=${BACKUP_DIR:?Set BACKUP_DIR to a new dedicated backup directory}
+test -f "$REPO_ROOT/deploy/zerolab-network-config"
+test -f "$REPO_ROOT/deploy/config/zerolab-network"
+test -f "$REPO_ROOT/deploy/systemd/zerolab-network.service"
+test -f "$REPO_ROOT/deploy/systemd/zerolab-hardware.service.d/10-network.conf"
+
+sudo install -d -m 0700 "$BACKUP_DIR"
+sudo sh -c ': > "$1"' sh "$BACKUP_DIR/present"
+
+backup_one() {
+    source_file=$1
+    backup_name=$2
+    if sudo test -e "$source_file"; then
+        sudo cp -a -- "$source_file" "$BACKUP_DIR/$backup_name"
+        printf '%s\n' "$backup_name" | sudo tee -a "$BACKUP_DIR/present" >/dev/null
+    fi
+}
+
+backup_one /etc/default/zerolab-network etc-default-zerolab-network
+backup_one /usr/local/libexec/zerolab-network-config zerolab-network-config
+backup_one /etc/systemd/system/zerolab-network.service zerolab-network.service
+backup_one /etc/systemd/system/zerolab-hardware.service.d/10-network.conf zerolab-hardware-10-network.conf
+
+sudo install -Dm 0755 "$REPO_ROOT/deploy/zerolab-network-config" /usr/local/libexec/zerolab-network-config
+sudo install -Dm 0644 "$REPO_ROOT/deploy/config/zerolab-network" /etc/default/zerolab-network
+sudo install -Dm 0644 "$REPO_ROOT/deploy/systemd/zerolab-network.service" /etc/systemd/system/zerolab-network.service
+sudo install -Dm 0644 "$REPO_ROOT/deploy/systemd/zerolab-hardware.service.d/10-network.conf" /etc/systemd/system/zerolab-hardware.service.d/10-network.conf
+
+sudo systemd-analyze verify /etc/systemd/system/zerolab-network.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now zerolab-network.service
+systemctl is-active zerolab-network.service
+~~~
+
+The helper is executable (0755); the configuration, unit, and hardware drop-in are data files (0644). The hardware service only wants and orders after the network service, so a network failure must not prevent PD or Normal from remaining available.
+
+## Direct mode
+
+The installation already writes ZEROLAB_NETWORK_MODE=direct. Direct users do not need to change any network configuration. Prove its no-op network contract by recording the actual receiving interfaces before a restart:
+
+~~~bash
+ZEROLAB_ETH=${ZEROLAB_ETH:?Set ZEROLAB_ETH to the robot receiving Ethernet interface}
+ZEROLAB_WIFI=${ZEROLAB_WIFI:?Set ZEROLAB_WIFI to the robot Wi-Fi interface}
+
+direct_addresses_before=$(ip -4 address show dev "$ZEROLAB_ETH")
+direct_arp_ignore_before=$(sysctl -n "net.ipv4.conf.${ZEROLAB_WIFI}.arp_ignore")
+
+sudo systemctl restart zerolab-network.service
+systemctl is-active zerolab-network.service
+test "$(ip -4 address show dev "$ZEROLAB_ETH")" = "$direct_addresses_before"
+test "$(sysctl -n "net.ipv4.conf.${ZEROLAB_WIFI}.arp_ignore")" = "$direct_arp_ignore_before"
+~~~
+
+Both test commands must succeed. They prove that direct mode added no address and changed no arp_ignore value.
+
+Find the receiver's existing IPv4 and give the sender that address with UDP port 18000; direct mode needs no additional address.
+
+~~~bash
+ip -4 address show
+ROBOT_IP=${ROBOT_IP:?Set ROBOT_IP to one existing robot IPv4 address shown above}
+ip -4 address show | grep -F -- "inet ${ROBOT_IP}/"
+printf 'Configure the sender target as %s:18000\n' "$ROBOT_IP"
+~~~
+
+## Alias mode
+
+Use alias mode only after the customer chooses the alias and confirms which Ethernet interface receives UDP and which Wi-Fi interface needs the ARP policy. 10.22.33.44 is only a customer-example value, never a default.
+
+First record whether that exact address already exists and the previous ARP setting. The service records this ownership, so switching modes restores only state that it owns.
+
+~~~bash
+ZEROLAB_ALIAS_IP=${ZEROLAB_ALIAS_IP:?Set ZEROLAB_ALIAS_IP to the customer-selected alias, for example 10.22.33.44}
+ZEROLAB_ETH=${ZEROLAB_ETH:?Set ZEROLAB_ETH to the Ethernet interface receiving ZeroLab UDP}
+ZEROLAB_WIFI=${ZEROLAB_WIFI:?Set ZEROLAB_WIFI to the Wi-Fi interface for arp_ignore}
+
+alias_was_present=absent
+if ip -o -4 address show dev "$ZEROLAB_ETH" | awk '{print $4}' | grep -Fx -- "${ZEROLAB_ALIAS_IP}/32" >/dev/null; then
+    alias_was_present=present
+fi
+alias_arp_ignore_before=$(sysctl -n "net.ipv4.conf.${ZEROLAB_WIFI}.arp_ignore")
+~~~
+
+Write the explicit alias configuration, then restart the supervisor:
+
+~~~bash
+sudo tee /etc/default/zerolab-network >/dev/null <<EOF
+ZEROLAB_NETWORK_MODE=alias
+ZEROLAB_ALIAS_IP=$ZEROLAB_ALIAS_IP
+ZEROLAB_ETH=$ZEROLAB_ETH
+ZEROLAB_WIFI=$ZEROLAB_WIFI
+EOF
+
+sudo systemctl restart zerolab-network.service
+systemctl is-active zerolab-network.service
+~~~
+
+Verify the exact /32, configured interface, arp_ignore=1, UDP listener, and journal. If the listener is absent, retain this output before changing anything else.
+
+~~~bash
+ip -o -4 address show dev "$ZEROLAB_ETH" | awk '{print $4}' | grep -Fx -- "${ZEROLAB_ALIAS_IP}/32"
+sysctl -n "net.ipv4.conf.${ZEROLAB_WIFI}.arp_ignore" | grep -Fx 1
+sudo ss -H -lunp 'sport = :18000'
+journalctl -u zerolab-network.service --since '-5 minutes' --no-pager
+~~~
+
+## Switch back to direct
+
+This mode switch cleans the service's saved alias state. It removes the alias only if this service added it and restores the recorded prior arp_ignore; it preserves a pre-existing alias address.
+
+~~~bash
+sudo tee /etc/default/zerolab-network >/dev/null <<'EOF'
+ZEROLAB_NETWORK_MODE=direct
+EOF
+
+sudo systemctl restart zerolab-network.service
+systemctl is-active zerolab-network.service
+
+if ip -o -4 address show dev "$ZEROLAB_ETH" | awk '{print $4}' | grep -Fx -- "${ZEROLAB_ALIAS_IP}/32" >/dev/null; then
+    test "$alias_was_present" = present
+else
+    test "$alias_was_present" = absent
+fi
+test "$(sysctl -n "net.ipv4.conf.${ZEROLAB_WIFI}.arp_ignore")" = "$alias_arp_ignore_before"
+~~~
+
+The final checks prove that only service-owned alias state was rolled back. Do not delete an address manually while the service is active; use the selected mode and restart the service so its state record stays accurate.
+
+## Operational diagnostics and safe behavior
+
+If the network service fails, inspect its status and journal. The non-blocking ordering means PD and Normal remain available. Entering ZeroLab without a usable stream leaves it at WAIT_STREAM; it does not make human targets take over. After enough valid UDP input it reaches WAIT_ARM, and it rejects Y until the operator deliberately arms from WAIT_ARM. Keep the operator neutral and use PD brake for abnormal motion.
+
+~~~bash
+systemctl status zerolab-network.service --no-pager
+journalctl -u zerolab-network.service --since '-15 minutes' --no-pager
+sudo systemctl stop zerolab-network.service
+~~~
+
+Stopping the service is also the safe first step before restoring the prior deployment.
+
+## Restore the backup
+
+Use the same guarded backup directory. The function restores a file only when it existed before this deployment; otherwise it removes only that explicitly installed file. It uses no recursive or wildcard deletion.
+
+~~~bash
+BACKUP_DIR=${BACKUP_DIR:?Set BACKUP_DIR to the backup directory created above}
+sudo systemctl stop zerolab-network.service
+
+# Remove this deployment's enablement before removing an originally absent unit.
+if ! sudo grep -Fx -- zerolab-network.service "$BACKUP_DIR/present" >/dev/null; then
+    sudo systemctl disable zerolab-network.service
+fi
+
+restore_one() {
+    backup_name=$1
+    target_file=$2
+    target_mode=$3
+    if sudo grep -Fx -- "$backup_name" "$BACKUP_DIR/present" >/dev/null; then
+        sudo install -Dm "$target_mode" "$BACKUP_DIR/$backup_name" "$target_file"
+    else
+        sudo rm -f -- "$target_file"
+    fi
+}
+
+restore_one etc-default-zerolab-network /etc/default/zerolab-network 0644
+restore_one zerolab-network-config /usr/local/libexec/zerolab-network-config 0755
+restore_one zerolab-network.service /etc/systemd/system/zerolab-network.service 0644
+restore_one zerolab-hardware-10-network.conf /etc/systemd/system/zerolab-hardware.service.d/10-network.conf 0644
+
+sudo systemctl daemon-reload
+~~~
+
+Keep the backup directory until the restored deployment has been checked. Do not remove service directories: these commands address only the four files installed by this guide.

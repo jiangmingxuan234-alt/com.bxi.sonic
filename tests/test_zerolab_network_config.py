@@ -18,6 +18,30 @@ def test_packaged_default_is_direct():
     assert text.strip() == "ZEROLAB_NETWORK_MODE=direct"
 
 
+def test_deployment_guide_covers_modes_safety_and_rollback():
+    text = (ROOT / "deploy/README-zerolab-network.md").read_text(
+        encoding="utf-8"
+    )
+
+    for required_text in [
+        "ZEROLAB_NETWORK_MODE=direct",
+        "ZEROLAB_NETWORK_MODE=alias",
+        "ZEROLAB_ALIAS_IP=",
+        "sudo systemctl restart zerolab-network.service",
+        "systemctl is-active zerolab-network.service",
+        "journalctl -u zerolab-network.service",
+        "WAIT_STREAM",
+        "WAIT_ARM",
+        "sudo systemctl stop zerolab-network.service",
+    ]:
+        assert required_text in text
+
+    assert "192.168.88.213" not in text
+
+    direct_section = text.split("## Alias mode", maxsplit=1)[0]
+    assert "mod.yaml" not in direct_section
+
+
 def test_network_unit_uses_optional_config_and_notify_supervisor():
     text = (ROOT / "deploy/systemd/zerolab-network.service").read_text()
     assert "Type=notify" in text
