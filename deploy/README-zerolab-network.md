@@ -116,6 +116,31 @@ printf 'Configure the sender target as %s:18000\n' "$ROBOT_IP"
 
 Use alias mode only after the customer chooses the alias and confirms which Ethernet interface receives UDP and which Wi-Fi interface needs the ARP policy. 10.22.33.44 is only a customer-example value, never a default.
 
+Alias mode requires the receiving Ethernet interface to have carrier and an
+ordinary IPv4 address supplied by the customer's DHCP or static configuration.
+The ZeroLab service does not edit NetworkManager profiles. While that ordinary
+network is unavailable, the service remains active and logs "waiting for ordinary Ethernet network"
+without adding its /32. After the ordinary network returns, the supervisor
+automatically restores the alias within its next reconciliation cycle.
+
+The ordinary address and the service-owned alias are separate. Verify both
+addresses independently before diagnosing a sender or listener problem:
+
+~~~bash
+ZEROLAB_ETH=${ZEROLAB_ETH:?Set ZEROLAB_ETH to the Ethernet interface receiving ZeroLab UDP}
+ZEROLAB_ALIAS_IP=${ZEROLAB_ALIAS_IP:?Set ZEROLAB_ALIAS_IP to the customer-selected alias}
+
+ip -o -4 address show dev "$ZEROLAB_ETH" | grep -v -F -- "${ZEROLAB_ALIAS_IP}/32"
+ip -o -4 address show dev "$ZEROLAB_ETH" | grep -Fx -- "${ZEROLAB_ALIAS_IP}/32"
+~~~
+
+If carrier or the ordinary IPv4 address is lost, the service-owned alias is
+temporarily withdrawn while the service remains active; this does not edit the
+ordinary network configuration. When the ordinary address returns, the
+supervisor restores the alias automatically. Its ownership record is retained,
+so switching back to direct mode still removes only an alias added by this
+service and restores the prior ARP setting; a pre-existing alias remains.
+
 First record whether that exact address already exists and the previous ARP setting. The service records this ownership, so switching modes restores only state that it owns.
 
 ~~~bash
