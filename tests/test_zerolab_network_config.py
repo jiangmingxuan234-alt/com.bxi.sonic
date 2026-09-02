@@ -287,6 +287,19 @@ def test_state_directory_rejects_parent_traversal(tmp_path):
     assert commands(fixture) == []
 
 
+def test_state_directory_rejects_symlinked_ancestor(tmp_path):
+    fixture = make_fixture(tmp_path, mode="direct")
+    escaped_parent = tmp_path / "escaped-parent"
+    escaped_parent.symlink_to("/outside-zerolab-state")
+    fixture.env["ZEROLAB_NETWORK_STATE_DIR"] = str(escaped_parent / "state")
+
+    result = run_helper(fixture, "start")
+
+    assert result.returncode == 2
+    assert "state directory must be under /run/* or /tmp/*" in result.stderr
+    assert commands(fixture) == []
+
+
 def test_direct_run_notifies_ready_and_stays_active(tmp_path):
     fixture = make_fixture(tmp_path, mode="direct")
     process = start_helper(fixture, "run")
