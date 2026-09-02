@@ -208,6 +208,7 @@ class Fixture:
     arp_state: Path
     ip_failure_control: Path
     ip_failure_log: Path
+    ip_success_log: Path
 
 
 def _fake_ip(
@@ -216,6 +217,7 @@ def _fake_ip(
     address_state: Path,
     ordinary_address_state: Path,
     failure_log: Path,
+    success_log: Path,
 ) -> None:
     path.write_text(
         "#!/bin/sh\n"
@@ -223,6 +225,7 @@ def _fake_ip(
         "printf 'ip %%s\\n' \"$*\" >> %s\n"
         "state=%s\n"
         "failure_log=%s\n"
+        "success_log=%s\n"
         "fail_action=${ZEROLAB_FAKE_IP_FAIL_ACTION:-}\n"
         "if [ -f \"${ZEROLAB_FAKE_IP_FAIL_ACTION_FILE:-}\" ]; then\n"
         "  fail_action=$(cat \"$ZEROLAB_FAKE_IP_FAIL_ACTION_FILE\")\n"
@@ -244,6 +247,7 @@ def _fake_ip(
         "        printf '    inet %%s scope global\\n' \"$address\"\n"
         "      fi\n"
         "    done < \"$state\"\n"
+        "    printf 'show\\n' >> \"$success_log\"\n"
         "    ;;\n"
         "  'address add '*)\n"
         "    if [ \"${ZEROLAB_FAKE_IP_FAIL_ADD_AFTER_ADD:-0}\" = 1 ]; then\n"
@@ -280,6 +284,7 @@ def _fake_ip(
             shlex.quote(str(log)),
             shlex.quote(str(address_state)),
             shlex.quote(str(failure_log)),
+            shlex.quote(str(success_log)),
             shlex.quote(str(ordinary_address_state)),
         ),
         encoding="utf-8",
@@ -338,6 +343,7 @@ def make_fixture(tmp_path: Path, mode: str | None) -> Fixture:
     arp_state = tmp_path / "arp_ignore"
     ip_failure_control = tmp_path / "ip-failure-action"
     ip_failure_log = tmp_path / "ip-failures.log"
+    ip_success_log = tmp_path / "ip-successes.log"
     ip = tmp_path / "ip"
     sysctl = tmp_path / "sysctl"
     notify = tmp_path / "systemd-notify"
@@ -352,6 +358,7 @@ def make_fixture(tmp_path: Path, mode: str | None) -> Fixture:
         address_state,
         ordinary_address_state,
         ip_failure_log,
+        ip_success_log,
     )
     _fake_sysctl(sysctl, command_log, arp_state)
     _fake_notify(notify, notify_log)
@@ -382,6 +389,7 @@ def make_fixture(tmp_path: Path, mode: str | None) -> Fixture:
         arp_state=arp_state,
         ip_failure_control=ip_failure_control,
         ip_failure_log=ip_failure_log,
+        ip_success_log=ip_success_log,
     )
 
 
@@ -1189,14 +1197,18 @@ def test_alias_run_does_not_mutate_address_when_address_inspection_fails(
         assert addresses(fixture) == {"192.168.50.27/32 enp-test"}
         assert saved_state(fixture) == snapshot
 
-        successful_show_boundary = commands(fixture).count(
-            "ip -4 address show dev enp-test"
+        success_boundary = (
+            len(fixture.ip_success_log.read_text(encoding="utf-8").splitlines())
+            if fixture.ip_success_log.exists()
+            else 0
         )
         fixture.ip_failure_control.unlink()
         assert wait_until(
-            lambda: commands(fixture).count(
-                "ip -4 address show dev enp-test"
-            ) > successful_show_boundary
+            lambda: fixture.ip_success_log.exists()
+            and fixture.ip_success_log.read_text(encoding="utf-8")
+            .splitlines()
+            .count("show")
+            > success_boundary
         )
         fixture.arp_state.write_text("7\n", encoding="utf-8")
         assert wait_until(lambda: arp_ignore(fixture) == "1")
