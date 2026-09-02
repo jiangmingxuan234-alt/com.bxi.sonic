@@ -587,6 +587,7 @@ reconcile_alias() {
     local arp_key
     local arp_ignore_current
     local address_status
+    local readiness_status
     local repaired=0
 
     if [[ ! -e "$STATE_DIR" && ! -L "$STATE_DIR" ]]; then
@@ -637,15 +638,22 @@ reconcile_alias() {
         fi
     fi
     if [[ $address_status -eq 1 ]]; then
-        if ! state_context_is_trusted; then
-            printf 'invalid saved state: state changed before alias repair\n' >&2
-            return 1
+        if ! alias_interface_ready "$ethernet"; then
+            readiness_status=$?
+            if [[ $readiness_status -ne 1 && $readiness_status -ne 2 ]]; then
+                return "$readiness_status"
+            fi
+        else
+            if ! state_context_is_trusted; then
+                printf 'invalid saved state: state changed before alias repair\n' >&2
+                return 1
+            fi
+            if ! "$IP_BIN" address add "$address" dev "$ethernet"; then
+                printf 'failed to repair saved alias address\n' >&2
+                return 1
+            fi
+            repaired=1
         fi
-        if ! "$IP_BIN" address add "$address" dev "$ethernet"; then
-            printf 'failed to repair saved alias address\n' >&2
-            return 1
-        fi
-        repaired=1
     fi
 
     if ! arp_ignore_current=$("$SYSCTL_BIN" -n "$arp_key"); then
