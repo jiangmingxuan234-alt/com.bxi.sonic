@@ -638,12 +638,7 @@ reconcile_alias() {
         fi
     fi
     if [[ $address_status -eq 1 ]]; then
-        if ! alias_interface_ready "$ethernet"; then
-            readiness_status=$?
-            if [[ $readiness_status -ne 1 && $readiness_status -ne 2 ]]; then
-                return "$readiness_status"
-            fi
-        else
+        if alias_interface_ready "$ethernet"; then
             if ! state_context_is_trusted; then
                 printf 'invalid saved state: state changed before alias repair\n' >&2
                 return 1
@@ -653,6 +648,11 @@ reconcile_alias() {
                 return 1
             fi
             repaired=1
+        else
+            readiness_status=$?
+            if [[ $readiness_status -ne 1 && $readiness_status -ne 2 ]]; then
+                return "$readiness_status"
+            fi
         fi
     fi
 

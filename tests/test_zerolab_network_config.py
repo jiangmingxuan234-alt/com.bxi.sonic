@@ -1122,6 +1122,30 @@ def test_alias_run_waits_without_ordinary_ipv4(tmp_path):
     assert process.returncode == 0
 
 
+def test_alias_run_reconciles_arp_when_carrier_down_and_alias_missing(tmp_path):
+    fixture = alias_fixture(tmp_path)
+    set_carrier(fixture, False)
+    process = start_helper(fixture, "run")
+
+    try:
+        assert wait_until(fixture.notify_log.exists)
+        assert wait_until(
+            lambda: commands(fixture).count(
+                "ip -4 address show dev enp-test"
+            )
+            >= 2
+        )
+        assert addresses(fixture) == set()
+        fixture.arp_state.write_text("7\n", encoding="utf-8")
+
+        assert wait_until(lambda: arp_ignore(fixture) == "1")
+        assert addresses(fixture) == set()
+    finally:
+        terminate_helper(process)
+
+    assert process.returncode == 0
+
+
 def test_alias_run_repairs_changed_arp_ignore(tmp_path):
     fixture = alias_fixture(tmp_path)
     process = start_helper(fixture, "run")
