@@ -1078,6 +1078,125 @@ def test_alias_run_repairs_removed_custom_address(tmp_path):
     assert process.returncode == 0
 
 
+def test_alias_run_withdraws_until_ordinary_network_recovers(tmp_path):
+    fixture = alias_fixture(tmp_path)
+    process = start_helper(fixture, "run")
+
+    try:
+        assert wait_until(
+            lambda: addresses(fixture) == {"192.168.50.27/32 enp-test"}
+        )
+        snapshot = saved_state(fixture)
+
+        set_carrier(fixture, False)
+        set_ordinary_addresses(fixture)
+        assert wait_until(lambda: addresses(fixture) == set())
+        assert saved_state(fixture) == snapshot
+
+        set_carrier(fixture, True)
+        set_ordinary_addresses(fixture, "10.0.0.11/24 enp-test")
+        assert wait_until(
+            lambda: addresses(fixture) == {"192.168.50.27/32 enp-test"}
+        )
+        assert saved_state(fixture) == snapshot
+    finally:
+        terminate_helper(process)
+
+    assert process.returncode == 0
+
+
+def test_alias_run_never_withdraws_preexisting_alias(tmp_path):
+    fixture = alias_fixture(tmp_path)
+    set_addresses(fixture, "192.168.50.27/32 enp-test")
+    process = start_helper(fixture, "run")
+
+    try:
+        assert wait_until(fixture.notify_log.exists)
+        set_carrier(fixture, False)
+        set_ordinary_addresses(fixture)
+        time.sleep(0.05)
+        assert addresses(fixture) == {"192.168.50.27/32 enp-test"}
+        assert saved_state(fixture)["address.origin"] == "preexisting\n"
+    finally:
+        terminate_helper(process)
+
+    assert process.returncode == 0
+
+
+def test_alias_run_does_not_mutate_address_when_carrier_is_unreadable(tmp_path):
+    fixture = alias_fixture(tmp_path)
+    process = start_helper(fixture, "run")
+
+    try:
+        assert wait_until(
+            lambda: addresses(fixture) == {"192.168.50.27/32 enp-test"}
+        )
+        fixture.carrier_state.write_text("unknown\n", encoding="utf-8")
+        time.sleep(0.05)
+        assert addresses(fixture) == {"192.168.50.27/32 enp-test"}
+    finally:
+        fixture.carrier_state.write_text("1\n", encoding="utf-8")
+        terminate_helper(process)
+
+    assert process.returncode == 0
+
+
+def test_alias_run_retries_failed_withdrawal_without_losing_snapshot(tmp_path):
+    fixture = alias_fixture(tmp_path)
+    process = start_helper(fixture, "run")
+
+    try:
+        assert wait_until(
+            lambda: addresses(fixture) == {"192.168.50.27/32 enp-test"}
+        )
+        snapshot = saved_state(fixture)
+        set_carrier(fixture, False)
+        set_ordinary_addresses(fixture)
+        fixture.ip_failure_control.write_text("del\n", encoding="utf-8")
+
+        assert wait_until(
+            lambda: commands(fixture).count(
+                "ip address del 192.168.50.27/32 dev enp-test"
+            ) >= 3
+        )
+        assert addresses(fixture) == {"192.168.50.27/32 enp-test"}
+        assert saved_state(fixture) == snapshot
+
+        fixture.ip_failure_control.unlink()
+        assert wait_until(lambda: addresses(fixture) == set())
+    finally:
+        terminate_helper(process)
+
+    assert process.returncode == 0
+
+
+def test_alias_stop_defers_missing_preexisting_alias_until_ordinary_network_recovers(
+    tmp_path,
+):
+    fixture = alias_fixture(tmp_path)
+    write_saved_state(fixture, **{"address.origin": "preexisting"})
+    set_carrier(fixture, False)
+    set_ordinary_addresses(fixture)
+    snapshot = saved_state(fixture)
+
+    deferred_stop = run_helper(fixture, "stop")
+
+    assert deferred_stop.returncode != 0
+    assert "preexisting alias restoration deferred until ordinary Ethernet is ready" in (
+        deferred_stop.stderr
+    )
+    assert addresses(fixture) == set()
+    assert saved_state(fixture) == snapshot
+
+    set_carrier(fixture, True)
+    set_ordinary_addresses(fixture, "10.0.0.11/24 enp-test")
+    restored_stop = run_helper(fixture, "stop")
+
+    assert restored_stop.returncode == 0
+    assert addresses(fixture) == {"192.168.50.27/32 enp-test"}
+    assert not Path(fixture.env["ZEROLAB_NETWORK_STATE_DIR"]).exists()
+
+
 def test_alias_run_waits_with_carrier_down(tmp_path):
     fixture = alias_fixture(tmp_path)
     set_carrier(fixture, False)

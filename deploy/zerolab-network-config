@@ -479,6 +479,7 @@ cleanup_saved_state() {
     local active
     local arp_key
     local address_status
+    local readiness_status
     local cleanup_failed=0
 
     if [[ ! -e "$STATE_DIR" && ! -L "$STATE_DIR" ]]; then
@@ -537,13 +538,13 @@ cleanup_saved_state() {
         printf 'invalid saved state: state changed during rollback\n' >&2
         return 1
     fi
-    if address_present "$address" "$ethernet"; then
+    if ! inspect_interface_addresses "$address" "$ethernet"; then
+        address_status=2
+        cleanup_failed=1
+    elif [[ "$INSPECTED_ALIAS_PRESENT" = 1 ]]; then
         address_status=0
     else
-        address_status=$?
-        if [[ $address_status -ne 1 ]]; then
-            cleanup_failed=1
-        fi
+        address_status=1
     fi
     if [[ $address_status -eq 0 ]]; then
         case "$address_origin" in
@@ -557,8 +558,16 @@ cleanup_saved_state() {
                 ;;
         esac
     elif [[ $address_status -eq 1 && "$address_origin" = preexisting ]]; then
-        if ! "$IP_BIN" address add "$address" dev "$ethernet"; then
-            printf 'failed to restore preexisting alias address\n' >&2
+        if alias_interface_ready "$ethernet"; then
+            if ! "$IP_BIN" address add "$address" dev "$ethernet"; then
+                printf 'failed to restore preexisting alias address\n' >&2
+                cleanup_failed=1
+            fi
+        else
+            readiness_status=$?
+            if [[ $readiness_status -eq 1 || $readiness_status -eq 2 ]]; then
+                printf 'preexisting alias restoration deferred until ordinary Ethernet is ready\n' >&2
+            fi
             cleanup_failed=1
         fi
     fi
@@ -575,6 +584,44 @@ cleanup_saved_state() {
     fi
 }
 
+reconcile_alias_address() {
+    local address=$1
+    local ethernet=$2
+    local address_origin=$3
+    local readiness
+
+    if ! inspect_interface_addresses "$address" "$ethernet"; then
+        return 1
+    fi
+    if alias_interface_ready "$ethernet"; then
+        readiness=ready
+    else
+        case $? in
+            1) readiness=unready ;;
+            *) return 1 ;;
+        esac
+    fi
+
+    case "$readiness:$address_origin:$INSPECTED_ALIAS_PRESENT" in
+        ready:*:1|unready:preexisting:*|unready:added:0)
+            return 0
+            ;;
+        ready:*:0)
+            state_context_is_trusted || return 1
+            "$IP_BIN" address add "$address" dev "$ethernet" || return 1
+            printf 'ZeroLab alias address restored\n' >&2
+            ;;
+        unready:added:1)
+            state_context_is_trusted || return 1
+            "$IP_BIN" address del "$address" dev "$ethernet" || return 1
+            printf 'ZeroLab alias withdrawn while ordinary Ethernet is unavailable\n' >&2
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 reconcile_alias() {
     local schema
     local saved_mode
@@ -586,8 +633,8 @@ reconcile_alias() {
     local active
     local arp_key
     local arp_ignore_current
-    local address_status
-    local readiness_status
+    local address_failed=0
+    local arp_failed=0
     local repaired=0
 
     if [[ ! -e "$STATE_DIR" && ! -L "$STATE_DIR" ]]; then
@@ -629,54 +676,32 @@ reconcile_alias() {
     esac
 
     arp_key="net.ipv4.conf.${wifi}.arp_ignore"
-    if address_present "$address" "$ethernet"; then
-        address_status=0
-    else
-        address_status=$?
-        if [[ $address_status -ne 1 ]]; then
-            return "$address_status"
-        fi
-    fi
-    if [[ $address_status -eq 1 ]]; then
-        if alias_interface_ready "$ethernet"; then
-            if ! state_context_is_trusted; then
-                printf 'invalid saved state: state changed before alias repair\n' >&2
-                return 1
-            fi
-            if ! "$IP_BIN" address add "$address" dev "$ethernet"; then
-                printf 'failed to repair saved alias address\n' >&2
-                return 1
-            fi
-            repaired=1
-        else
-            readiness_status=$?
-            if [[ $readiness_status -ne 1 && $readiness_status -ne 2 ]]; then
-                return "$readiness_status"
-            fi
-        fi
+    if ! reconcile_alias_address "$address" "$ethernet" "$address_origin"; then
+        address_failed=1
     fi
 
     if ! arp_ignore_current=$("$SYSCTL_BIN" -n "$arp_key"); then
         printf 'failed to read %s\n' "$arp_key" >&2
-        return 1
-    fi
-    if ! valid_uint "$arp_ignore_current"; then
+        arp_failed=1
+    elif ! valid_uint "$arp_ignore_current"; then
         printf 'invalid %s value\n' "$arp_key" >&2
-        return 1
-    fi
-    if [[ "$arp_ignore_current" != 1 ]]; then
+        arp_failed=1
+    elif [[ "$arp_ignore_current" != 1 ]]; then
         if ! state_context_is_trusted; then
             printf 'invalid saved state: state changed before ARP repair\n' >&2
-            return 1
-        fi
-        if ! "$SYSCTL_BIN" -w "$arp_key=1"; then
+            arp_failed=1
+        elif ! "$SYSCTL_BIN" -w "$arp_key=1"; then
             printf 'failed to repair %s\n' "$arp_key" >&2
-            return 1
+            arp_failed=1
+        else
+            repaired=1
         fi
-        repaired=1
     fi
     if [[ $repaired -eq 1 ]]; then
         printf 'ZeroLab alias reconciliation repaired\n' >&2
+    fi
+    if [[ $address_failed -ne 0 || $arp_failed -ne 0 ]]; then
+        return 1
     fi
     return 0
 }
