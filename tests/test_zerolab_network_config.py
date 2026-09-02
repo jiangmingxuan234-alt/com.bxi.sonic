@@ -1141,6 +1141,45 @@ def test_alias_run_does_not_mutate_address_when_carrier_is_unreadable(tmp_path):
     assert process.returncode == 0
 
 
+def test_alias_run_does_not_mutate_address_when_address_inspection_fails(
+    tmp_path,
+):
+    fixture = alias_fixture(tmp_path)
+    process = start_helper(fixture, "run")
+
+    try:
+        assert wait_until(
+            lambda: fixture.notify_log.exists()
+            and addresses(fixture) == {"192.168.50.27/32 enp-test"}
+        )
+        snapshot = saved_state(fixture)
+        command_boundary = len(commands(fixture))
+        fixture.ip_failure_control.write_text("show\n", encoding="utf-8")
+
+        assert wait_until(
+            lambda: commands(fixture)[command_boundary:].count(
+                "ip -4 address show dev enp-test"
+            ) >= 2
+        )
+        assert not any(
+            command.startswith("ip address add ")
+            or command.startswith("ip address del ")
+            for command in commands(fixture)[command_boundary:]
+        )
+        assert addresses(fixture) == {"192.168.50.27/32 enp-test"}
+        assert saved_state(fixture) == snapshot
+
+        fixture.ip_failure_control.unlink()
+        fixture.arp_state.write_text("7\n", encoding="utf-8")
+        assert wait_until(lambda: arp_ignore(fixture) == "1")
+    finally:
+        if fixture.ip_failure_control.exists():
+            fixture.ip_failure_control.unlink()
+        terminate_helper(process)
+
+    assert process.returncode == 0
+
+
 def test_alias_run_retries_failed_withdrawal_without_losing_snapshot(tmp_path):
     fixture = alias_fixture(tmp_path)
     process = start_helper(fixture, "run")
