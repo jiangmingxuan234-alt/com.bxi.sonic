@@ -67,6 +67,10 @@ validate_state_dir() {
             return 2
             ;;
     esac
+    if ! state_parent_chain_is_trusted; then
+        printf 'state directory is not trusted\n' >&2
+        return 2
+    fi
 }
 
 validate_reconcile_seconds() {
@@ -126,6 +130,97 @@ valid_address() {
     [[ "$address" = "$address_ip/32" ]] && valid_ipv4 "$address_ip"
 }
 
+path_is_owned_and_restricted() {
+    local path=$1
+    local kind=$2
+    local restriction=$3
+    local owner
+    local permissions
+
+    case "$kind" in
+        directory)
+            [[ -d "$path" && ! -L "$path" ]] || return 1
+            ;;
+        file)
+            [[ -f "$path" && ! -L "$path" ]] || return 1
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    if ! owner=$(stat -c %u -- "$path") ||
+        ! permissions=$(stat -c %a -- "$path")
+    then
+        return 1
+    fi
+    [[ "$owner" = "$EUID" && "$permissions" =~ ^[0-7]+$ ]] || return 1
+    case "$restriction" in
+        private)
+            (( (8#$permissions & 8#077) == 0 ))
+            ;;
+        no_group_or_world_write)
+            (( (8#$permissions & 8#022) == 0 ))
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+tmp_root_is_trusted() {
+    local owner
+    local permissions
+
+    [[ -d /tmp && ! -L /tmp ]] || return 1
+    if ! owner=$(stat -c %u -- /tmp) ||
+        ! permissions=$(stat -c %a -- /tmp)
+    then
+        return 1
+    fi
+    # 65534 is the mapped representation of host root in rootless test namespaces.
+    case "$owner" in
+        0|65534)
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    [[ "$permissions" =~ ^[0-7]+$ ]] || return 1
+    (( (8#$permissions & 8#1000) != 0 ))
+}
+
+state_parent_chain_is_trusted() {
+    local allowed_root
+    local parent=${STATE_DIR%/*}
+
+    case "$STATE_DIR" in
+        /tmp/*)
+            allowed_root=/tmp
+            tmp_root_is_trusted || return 1
+            ;;
+        /run/*)
+            allowed_root=/run
+            path_is_owned_and_restricted /run directory no_group_or_world_write || return 1
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    while [[ "$parent" != "$allowed_root" ]]; do
+        path_is_owned_and_restricted "$parent" directory no_group_or_world_write || return 1
+        parent=${parent%/*}
+    done
+}
+
+state_directory_is_trusted() {
+    state_parent_chain_is_trusted &&
+        path_is_owned_and_restricted "$STATE_DIR" directory private
+}
+
+state_file_is_trusted() {
+    path_is_owned_and_restricted "$1" file private
+}
+
 address_present() {
     local address=$1
     local interface=$2
@@ -149,7 +244,7 @@ read_state_value() {
     local name=$2
     local -a lines
 
-    if [[ ! -f "$filename" || -L "$filename" ]]; then
+    if ! state_file_is_trusted "$filename"; then
         printf 'invalid saved state: missing or unsafe %s\n' "$name" >&2
         return 1
     fi
@@ -209,11 +304,58 @@ validate_state_entries() {
                 return 1
                 ;;
         esac
-        if [[ ! -f "$entry" || -L "$entry" ]]; then
+        if ! state_file_is_trusted "$entry"; then
             printf 'invalid saved state: unsafe entry %s\n' "$name" >&2
             return 1
         fi
     done
+}
+
+state_context_is_trusted() {
+    state_directory_is_trusted && validate_state_entries
+}
+
+remove_complete_state_directory() {
+    local directory=$1
+    local name
+
+    for name in schema mode address eth wifi arp_ignore.old address.origin active; do
+        if ! rm -- "$directory/$name"; then
+            printf 'failed to remove saved state entry %s\n' "$name" >&2
+            return 1
+        fi
+    done
+    if ! rmdir -- "$directory"; then
+        printf 'failed to remove saved state\n' >&2
+        return 1
+    fi
+}
+
+remove_partial_state_directory() {
+    local directory=$1
+    local name
+
+    for name in schema mode address eth wifi arp_ignore.old address.origin active; do
+        if [[ -e "$directory/$name" || -L "$directory/$name" ]] &&
+            ! rm -- "$directory/$name"
+        then
+            return 1
+        fi
+    done
+    rmdir -- "$directory"
+}
+
+discard_unconfirmed_add_state() {
+    if ! write_state_value "$STATE_DIR" active unconfirmed-add; then
+        printf 'failed to quarantine unconfirmed alias state\n' >&2
+        return 1
+    fi
+    if ! state_context_is_trusted ||
+        ! remove_complete_state_directory "$STATE_DIR"
+    then
+        printf 'failed to discard unconfirmed alias state\n' >&2
+        return 1
+    fi
 }
 
 prepare_alias_state() {
@@ -221,6 +363,12 @@ prepare_alias_state() {
     local arp_ignore_old
     local address_status
     local state_new
+    local state_entry
+
+    if ! state_parent_chain_is_trusted; then
+        printf 'state directory is not trusted\n' >&2
+        return 1
+    fi
 
     if address_present "$ALIAS_ADDRESS" "$ALIAS_ETH"; then
         ALIAS_ADDRESS_ORIGIN=preexisting
@@ -250,6 +398,11 @@ prepare_alias_state() {
         printf 'failed to create saved state\n' >&2
         return 1
     fi
+    if ! path_is_owned_and_restricted "$state_new" directory private; then
+        remove_partial_state_directory "$state_new" || true
+        printf 'failed to create trusted saved state\n' >&2
+        return 1
+    fi
     if ! write_state_value "$state_new" schema 1 ||
         ! write_state_value "$state_new" mode alias ||
         ! write_state_value "$state_new" address "$ALIAS_ADDRESS" ||
@@ -259,12 +412,19 @@ prepare_alias_state() {
         ! write_state_value "$state_new" address.origin "$ALIAS_ADDRESS_ORIGIN" ||
         ! write_state_value "$state_new" active 1
     then
-        rm -rf -- "$state_new"
+        remove_partial_state_directory "$state_new" || true
         printf 'failed to write saved state\n' >&2
         return 1
     fi
+    for state_entry in schema mode address eth wifi arp_ignore.old address.origin active; do
+        if ! state_file_is_trusted "$state_new/$state_entry"; then
+            remove_partial_state_directory "$state_new" || true
+            printf 'failed to create trusted saved state\n' >&2
+            return 1
+        fi
+    done
     if ! mv -T -- "$state_new" "$STATE_DIR"; then
-        rm -rf -- "$state_new"
+        remove_partial_state_directory "$state_new" || true
         printf 'failed to install saved state\n' >&2
         return 1
     fi
@@ -288,6 +448,10 @@ cleanup_saved_state() {
     fi
     if [[ ! -d "$STATE_DIR" || -L "$STATE_DIR" ]]; then
         printf 'invalid saved state: state path is not a directory\n' >&2
+        return 1
+    fi
+    if ! state_directory_is_trusted; then
+        printf 'invalid saved state: state path is not trusted\n' >&2
         return 1
     fi
     validate_state_entries || return 1
@@ -322,11 +486,19 @@ cleanup_saved_state() {
     esac
 
     arp_key="net.ipv4.conf.${wifi}.arp_ignore"
+    if ! state_context_is_trusted; then
+        printf 'invalid saved state: state changed before rollback\n' >&2
+        return 1
+    fi
     if ! "$SYSCTL_BIN" -w "$arp_key=$arp_ignore_old"; then
         printf 'failed to restore %s\n' "$arp_key" >&2
         cleanup_failed=1
     fi
 
+    if ! state_context_is_trusted; then
+        printf 'invalid saved state: state changed during rollback\n' >&2
+        return 1
+    fi
     if address_present "$address" "$ethernet"; then
         address_status=0
     else
@@ -357,7 +529,9 @@ cleanup_saved_state() {
         printf 'saved state rollback incomplete; retaining state\n' >&2
         return 1
     fi
-    if ! rm -rf -- "$STATE_DIR"; then
+    if ! state_context_is_trusted ||
+        ! remove_complete_state_directory "$STATE_DIR"
+    then
         printf 'failed to remove saved state\n' >&2
         return 1
     fi
@@ -369,15 +543,23 @@ start_alias() {
     validate_alias_config || return $?
     prepare_alias_state || return 1
 
+    if ! state_context_is_trusted; then
+        printf 'saved state is not trusted before alias add\n' >&2
+        return 1
+    fi
     if [[ "$ALIAS_ADDRESS_ORIGIN" = added ]]; then
         if ! "$IP_BIN" address add "$ALIAS_ADDRESS" dev "$ALIAS_ETH"; then
             printf 'failed to add alias address\n' >&2
-            cleanup_saved_state || true
+            discard_unconfirmed_add_state || true
             return 1
         fi
     fi
 
     arp_key="net.ipv4.conf.${ALIAS_WIFI}.arp_ignore"
+    if ! state_context_is_trusted; then
+        printf 'saved state is not trusted before ARP update\n' >&2
+        return 1
+    fi
     if ! "$SYSCTL_BIN" -w "$arp_key=1"; then
         printf 'failed to set %s\n' "$arp_key" >&2
         cleanup_saved_state || true

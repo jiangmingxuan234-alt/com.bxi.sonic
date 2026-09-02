@@ -40,6 +40,12 @@ def _fake_ip(path: Path, log: Path, address_state: Path) -> None:
         "    done < \"$state\"\n"
         "    ;;\n"
         "  'address add '*)\n"
+        "    if [ \"${ZEROLAB_FAKE_IP_FAIL_ADD_AFTER_ADD:-0}\" = 1 ]; then\n"
+        "      address=$3\n"
+        "      interface=$5\n"
+        "      printf '%%s %%s\\n' \"$address\" \"$interface\" >> \"$state\"\n"
+        "      exit 1\n"
+        "    fi\n"
         "    if [ \"${ZEROLAB_FAKE_IP_FAIL_ACTION:-}\" = add ]; then\n"
         "      exit 1\n"
         "    fi\n"
@@ -182,6 +188,7 @@ def arp_ignore(fixture: Fixture) -> str:
 def write_saved_state(fixture: Fixture, **overrides: str) -> None:
     state = Path(fixture.env["ZEROLAB_NETWORK_STATE_DIR"])
     state.mkdir()
+    state.chmod(0o700)
     values = {
         "schema": "1",
         "mode": "alias",
@@ -194,7 +201,9 @@ def write_saved_state(fixture: Fixture, **overrides: str) -> None:
     }
     values.update(overrides)
     for name, value in values.items():
-        (state / name).write_text(f"{value}\n", encoding="utf-8")
+        entry = state / name
+        entry.write_text(f"{value}\n", encoding="utf-8")
+        entry.chmod(0o600)
 
 
 def saved_state(fixture: Fixture) -> dict[str, str]:
@@ -326,6 +335,20 @@ def test_state_directory_rejects_symlinked_final_component_with_trailing_slash(t
     assert commands(fixture) == []
 
 
+def test_state_directory_rejects_group_writable_ancestor_before_commands(tmp_path):
+    fixture = make_fixture(tmp_path, mode="direct")
+    writable_parent = tmp_path / "writable-parent"
+    writable_parent.mkdir()
+    writable_parent.chmod(0o777)
+    fixture.env["ZEROLAB_NETWORK_STATE_DIR"] = str(writable_parent / "state")
+
+    result = run_helper(fixture, "start")
+
+    assert result.returncode == 2
+    assert "state directory is not trusted" in result.stderr
+    assert commands(fixture) == []
+
+
 def test_direct_run_notifies_ready_and_stays_active(tmp_path):
     fixture = make_fixture(tmp_path, mode="direct")
     process = start_helper(fixture, "run")
@@ -441,6 +464,52 @@ def test_alias_sysctl_failure_removes_service_added_address(tmp_path):
         "ip address del 192.168.50.27/32 dev enp-test",
     ]
     assert addresses(fixture) == set()
+    assert arp_ignore(fixture) == "7"
+    assert not Path(fixture.env["ZEROLAB_NETWORK_STATE_DIR"]).exists()
+
+
+@pytest.mark.parametrize(
+    ("target", "mode"),
+    [("directory", 0o755), ("file", 0o640)],
+)
+def test_saved_state_rejects_nonprivate_permissions_before_commands(
+    tmp_path, target, mode
+):
+    fixture = alias_fixture(tmp_path)
+    write_saved_state(fixture)
+    state = Path(fixture.env["ZEROLAB_NETWORK_STATE_DIR"])
+    if target == "directory":
+        state.chmod(mode)
+    else:
+        (state / "address").chmod(mode)
+
+    result = run_helper(fixture, "stop")
+
+    assert result.returncode != 0
+    expected_error = (
+        "invalid saved state: state path is not trusted"
+        if target == "directory"
+        else "invalid saved state: unsafe entry address"
+    )
+    assert expected_error in result.stderr
+    assert commands(fixture) == []
+    assert state.exists()
+
+
+def test_alias_failed_add_does_not_delete_address_that_appears_during_failure(tmp_path):
+    fixture = alias_fixture(tmp_path)
+    fixture.arp_state.write_text("7\n", encoding="utf-8")
+    fixture.env["ZEROLAB_FAKE_IP_FAIL_ADD_AFTER_ADD"] = "1"
+
+    result = run_helper(fixture, "start")
+
+    assert result.returncode != 0
+    assert commands(fixture) == [
+        "ip -4 address show dev enp-test",
+        "sysctl -n net.ipv4.conf.wlan-test.arp_ignore",
+        "ip address add 192.168.50.27/32 dev enp-test",
+    ]
+    assert addresses(fixture) == {"192.168.50.27/32 enp-test"}
     assert arp_ignore(fixture) == "7"
     assert not Path(fixture.env["ZEROLAB_NETWORK_STATE_DIR"]).exists()
 
