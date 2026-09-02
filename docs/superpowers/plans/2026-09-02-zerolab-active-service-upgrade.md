@@ -215,6 +215,6 @@ Recompute the host checkout status SHA-256 and require it to equal the pre-archi
 
 - [ ] **Step 5: Request independent final review**
 
-Give the reviewer the two approved specs, this plan, base `sonic-upstream/main`, final `HEAD`, all fresh local results, and the ELF3-81 acceptance evidence. Require Critical/Important/Minor findings and an explicit APPROVE or BLOCK verdict.
+Give the reviewer the three approved specs, this plan, base `sonic-upstream/main`, final `HEAD`, all fresh local results, and the ELF3-81 acceptance evidence. Require Critical/Important/Minor findings and an explicit APPROVE or BLOCK verdict.
 
 Expected: no Critical or Important findings and APPROVE for push/PR. If blocked, return to Task 1 with a new failing regression test for each valid finding.
