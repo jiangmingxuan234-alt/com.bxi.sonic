@@ -49,6 +49,7 @@ validate_state_dir() {
             return 2
             ;;
     esac
+    STATE_DIR=${STATE_DIR%/}
     if [[ -L "$STATE_DIR" ]]; then
         printf 'state directory must be under /run/* or /tmp/*\n' >&2
         return 2
