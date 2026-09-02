@@ -537,6 +537,104 @@ cleanup_saved_state() {
     fi
 }
 
+reconcile_alias() {
+    local schema
+    local saved_mode
+    local address
+    local ethernet
+    local wifi
+    local arp_ignore_old
+    local address_origin
+    local active
+    local arp_key
+    local arp_ignore_current
+    local address_status
+    local repaired=0
+
+    if [[ ! -e "$STATE_DIR" && ! -L "$STATE_DIR" ]]; then
+        printf 'invalid saved state: missing state for alias reconciliation\n' >&2
+        return 1
+    fi
+    if ! state_context_is_trusted; then
+        printf 'invalid saved state: state path is not trusted\n' >&2
+        return 1
+    fi
+    if ! schema=$(read_state_value "$STATE_DIR/schema" schema) ||
+        ! saved_mode=$(read_state_value "$STATE_DIR/mode" mode) ||
+        ! address=$(read_state_value "$STATE_DIR/address" address) ||
+        ! ethernet=$(read_state_value "$STATE_DIR/eth" eth) ||
+        ! wifi=$(read_state_value "$STATE_DIR/wifi" wifi) ||
+        ! arp_ignore_old=$(read_state_value "$STATE_DIR/arp_ignore.old" arp_ignore.old) ||
+        ! address_origin=$(read_state_value "$STATE_DIR/address.origin" address.origin) ||
+        ! active=$(read_state_value "$STATE_DIR/active" active)
+    then
+        return 1
+    fi
+    if [[ "$schema" != 1 || "$saved_mode" != alias || "$active" != 1 ]]; then
+        printf 'invalid saved state: unsupported schema, mode, or activity\n' >&2
+        return 1
+    fi
+    if ! valid_address "$address" || ! valid_interface "$ethernet" ||
+        ! valid_interface "$wifi" || ! valid_uint "$arp_ignore_old"
+    then
+        printf 'invalid saved state: unsafe reconciliation value\n' >&2
+        return 1
+    fi
+    case "$address_origin" in
+        added|preexisting)
+            ;;
+        *)
+            printf 'invalid saved state: unknown address origin\n' >&2
+            return 1
+            ;;
+    esac
+
+    arp_key="net.ipv4.conf.${wifi}.arp_ignore"
+    if address_present "$address" "$ethernet"; then
+        address_status=0
+    else
+        address_status=$?
+        if [[ $address_status -ne 1 ]]; then
+            return "$address_status"
+        fi
+    fi
+    if [[ $address_status -eq 1 ]]; then
+        if ! state_context_is_trusted; then
+            printf 'invalid saved state: state changed before alias repair\n' >&2
+            return 1
+        fi
+        if ! "$IP_BIN" address add "$address" dev "$ethernet"; then
+            printf 'failed to repair saved alias address\n' >&2
+            return 1
+        fi
+        repaired=1
+    fi
+
+    if ! arp_ignore_current=$("$SYSCTL_BIN" -n "$arp_key"); then
+        printf 'failed to read %s\n' "$arp_key" >&2
+        return 1
+    fi
+    if ! valid_uint "$arp_ignore_current"; then
+        printf 'invalid %s value\n' "$arp_key" >&2
+        return 1
+    fi
+    if [[ "$arp_ignore_current" != 1 ]]; then
+        if ! state_context_is_trusted; then
+            printf 'invalid saved state: state changed before ARP repair\n' >&2
+            return 1
+        fi
+        if ! "$SYSCTL_BIN" -w "$arp_key=1"; then
+            printf 'failed to repair %s\n' "$arp_key" >&2
+            return 1
+        fi
+        repaired=1
+    fi
+    if [[ $repaired -eq 1 ]]; then
+        printf 'ZeroLab alias reconciliation repaired\n' >&2
+    fi
+    return 0
+}
+
 start_alias() {
     local arp_key
 
@@ -587,11 +685,14 @@ stop_network() {
 
 run_network() {
     validate_reconcile_seconds
+    trap 'cleanup_saved_state; exit $?' INT TERM
     start_network
     "$SYSTEMD_NOTIFY_BIN" --ready
-    trap 'exit 0' INT TERM
     while :; do
         sleep "$RECONCILE_SECONDS"
+        if [ "$MODE" = alias ] && ! reconcile_alias; then
+            echo "ZeroLab alias reconciliation failed; retrying" >&2
+        fi
     done
 }
 

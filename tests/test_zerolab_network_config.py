@@ -19,6 +19,7 @@ class Fixture:
     notify_log: Path
     address_state: Path
     arp_state: Path
+    ip_failure_control: Path
 
 
 def _fake_ip(path: Path, log: Path, address_state: Path) -> None:
@@ -27,9 +28,13 @@ def _fake_ip(path: Path, log: Path, address_state: Path) -> None:
         "set -eu\n"
         "printf 'ip %%s\\n' \"$*\" >> %s\n"
         "state=%s\n"
+        "fail_action=${ZEROLAB_FAKE_IP_FAIL_ACTION:-}\n"
+        "if [ -f \"${ZEROLAB_FAKE_IP_FAIL_ACTION_FILE:-}\" ]; then\n"
+        "  fail_action=$(cat \"$ZEROLAB_FAKE_IP_FAIL_ACTION_FILE\")\n"
+        "fi\n"
         "case \"$*\" in\n"
         "  '-4 address show dev '*)\n"
-        "    if [ \"${ZEROLAB_FAKE_IP_FAIL_ACTION:-}\" = show ]; then\n"
+        "    if [ \"$fail_action\" = show ]; then\n"
         "      exit 1\n"
         "    fi\n"
         "    interface=$5\n"
@@ -46,7 +51,7 @@ def _fake_ip(path: Path, log: Path, address_state: Path) -> None:
         "      printf '%%s %%s\\n' \"$address\" \"$interface\" >> \"$state\"\n"
         "      exit 1\n"
         "    fi\n"
-        "    if [ \"${ZEROLAB_FAKE_IP_FAIL_ACTION:-}\" = add ]; then\n"
+        "    if [ \"$fail_action\" = add ]; then\n"
         "      exit 1\n"
         "    fi\n"
         "    address=$3\n"
@@ -57,7 +62,7 @@ def _fake_ip(path: Path, log: Path, address_state: Path) -> None:
         "    printf '%%s %%s\\n' \"$address\" \"$interface\" >> \"$state\"\n"
         "    ;;\n"
         "  'address del '*)\n"
-        "    if [ \"${ZEROLAB_FAKE_IP_FAIL_ACTION:-}\" = del ]; then\n"
+        "    if [ \"$fail_action\" = del ]; then\n"
         "      exit 1\n"
         "    fi\n"
         "    address=$3\n"
@@ -121,6 +126,7 @@ def make_fixture(tmp_path: Path, mode: str | None) -> Fixture:
     notify_log = tmp_path / "notify.log"
     address_state = tmp_path / "addresses"
     arp_state = tmp_path / "arp_ignore"
+    ip_failure_control = tmp_path / "ip-failure-action"
     ip = tmp_path / "ip"
     sysctl = tmp_path / "sysctl"
     notify = tmp_path / "systemd-notify"
@@ -142,6 +148,7 @@ def make_fixture(tmp_path: Path, mode: str | None) -> Fixture:
             "ZEROLAB_SYSTEMD_NOTIFY_BIN": str(notify),
             "ZEROLAB_NETWORK_STATE_DIR": str(tmp_path / "state"),
             "ZEROLAB_RECONCILE_SECONDS": "0.01",
+            "ZEROLAB_FAKE_IP_FAIL_ACTION_FILE": str(ip_failure_control),
         }
     )
     return Fixture(
@@ -150,6 +157,7 @@ def make_fixture(tmp_path: Path, mode: str | None) -> Fixture:
         notify_log=notify_log,
         address_state=address_state,
         arp_state=arp_state,
+        ip_failure_control=ip_failure_control,
     )
 
 
@@ -796,3 +804,157 @@ def test_saved_state_rejects_unknown_incomplete_or_unsafe_entries(tmp_path, kind
     assert "invalid saved state" in result.stderr
     assert commands(fixture) == []
     assert state.exists()
+
+
+def terminate_helper(process: subprocess.Popen[str]) -> tuple[str, str]:
+    if process.poll() is None:
+        process.terminate()
+    return process.communicate(timeout=2)
+
+
+def test_alias_run_repairs_removed_custom_address(tmp_path):
+    fixture = alias_fixture(tmp_path)
+    process = start_helper(fixture, "run")
+
+    try:
+        assert wait_until(
+            lambda: fixture.notify_log.exists()
+            and addresses(fixture) == {"192.168.50.27/32 enp-test"}
+        )
+        set_addresses(fixture)
+
+        assert wait_until(
+            lambda: addresses(fixture) == {"192.168.50.27/32 enp-test"}
+        )
+    finally:
+        terminate_helper(process)
+
+    assert process.returncode == 0
+
+
+def test_alias_run_repairs_changed_arp_ignore(tmp_path):
+    fixture = alias_fixture(tmp_path)
+    process = start_helper(fixture, "run")
+
+    try:
+        assert wait_until(
+            lambda: fixture.notify_log.exists() and arp_ignore(fixture) == "1"
+        )
+        fixture.arp_state.write_text("7\n", encoding="utf-8")
+
+        assert wait_until(lambda: arp_ignore(fixture) == "1")
+    finally:
+        terminate_helper(process)
+
+    assert process.returncode == 0
+
+
+def test_alias_run_termination_restores_baseline(tmp_path):
+    fixture = alias_fixture(tmp_path)
+    fixture.arp_state.write_text("7\n", encoding="utf-8")
+    process = start_helper(fixture, "run")
+
+    try:
+        assert wait_until(
+            lambda: fixture.notify_log.exists()
+            and addresses(fixture) == {"192.168.50.27/32 enp-test"}
+            and arp_ignore(fixture) == "1"
+        )
+    finally:
+        terminate_helper(process)
+
+    assert process.returncode == 0
+    assert addresses(fixture) == set()
+    assert arp_ignore(fixture) == "7"
+    assert not Path(fixture.env["ZEROLAB_NETWORK_STATE_DIR"]).exists()
+
+
+def test_reconcile_failure_retries_without_losing_snapshot(tmp_path):
+    fixture = alias_fixture(tmp_path)
+    process = start_helper(fixture, "run")
+
+    try:
+        assert wait_until(
+            lambda: fixture.notify_log.exists()
+            and addresses(fixture) == {"192.168.50.27/32 enp-test"}
+        )
+        snapshot = saved_state(fixture)
+        fixture.ip_failure_control.write_text("add\n", encoding="utf-8")
+        set_addresses(fixture)
+
+        assert wait_until(
+            lambda: commands(fixture).count(
+                "ip address add 192.168.50.27/32 dev enp-test"
+            )
+            >= 3
+        )
+        assert addresses(fixture) == set()
+        assert saved_state(fixture) == snapshot
+
+        fixture.ip_failure_control.unlink()
+        assert wait_until(
+            lambda: addresses(fixture) == {"192.168.50.27/32 enp-test"}
+        )
+    finally:
+        terminate_helper(process)
+
+    assert process.returncode == 0
+
+
+def test_direct_start_cleans_service_owned_alias_state(tmp_path):
+    fixture = alias_fixture(tmp_path)
+    set_addresses(fixture, "192.168.50.27/32 enp-test")
+    fixture.arp_state.write_text("1\n", encoding="utf-8")
+    write_saved_state(fixture)
+    fixture.env["ZEROLAB_NETWORK_MODE"] = "direct"
+
+    result = run_helper(fixture, "start")
+
+    assert result.returncode == 0
+    assert addresses(fixture) == set()
+    assert arp_ignore(fixture) == "0"
+    assert not Path(fixture.env["ZEROLAB_NETWORK_STATE_DIR"]).exists()
+
+
+def test_direct_start_fails_when_owned_state_cleanup_is_incomplete(tmp_path):
+    fixture = alias_fixture(tmp_path)
+    set_addresses(fixture, "192.168.50.27/32 enp-test")
+    fixture.arp_state.write_text("1\n", encoding="utf-8")
+    write_saved_state(fixture)
+    fixture.env["ZEROLAB_NETWORK_MODE"] = "direct"
+    fixture.env["ZEROLAB_FAKE_SYSCTL_FAIL_VALUE"] = "0"
+
+    result = run_helper(fixture, "start")
+
+    assert result.returncode != 0
+    assert addresses(fixture) == set()
+    assert arp_ignore(fixture) == "1"
+    assert saved_state(fixture) == expected_saved_state("0", "added")
+
+
+def test_alias_ip_change_deletes_stored_old_ip_before_adding_new_ip(tmp_path):
+    fixture = alias_fixture(tmp_path)
+
+    assert run_helper(fixture, "start").returncode == 0
+    fixture.env["ZEROLAB_ALIAS_IP"] = "10.22.33.44"
+
+    result = run_helper(fixture, "start")
+
+    assert result.returncode == 0
+    log = commands(fixture)
+    assert log.index("ip address del 192.168.50.27/32 dev enp-test") < log.index(
+        "ip address add 10.22.33.44/32 dev enp-test"
+    )
+    assert addresses(fixture) == {"10.22.33.44/32 enp-test"}
+    assert run_helper(fixture, "stop").returncode == 0
+
+
+def test_direct_never_deletes_address_without_owned_state(tmp_path):
+    fixture = make_fixture(tmp_path, mode="direct")
+    set_addresses(fixture, "192.168.50.27/32 enp-test")
+
+    result = run_helper(fixture, "start")
+
+    assert result.returncode == 0
+    assert addresses(fixture) == {"192.168.50.27/32 enp-test"}
+    assert commands(fixture) == []
