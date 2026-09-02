@@ -69,6 +69,10 @@ backup_one /usr/local/libexec/zerolab-network-config zerolab-network-config
 backup_one /etc/systemd/system/zerolab-network.service zerolab-network.service
 backup_one /etc/systemd/system/zerolab-hardware.service.d/10-network.conf zerolab-hardware-10-network.conf
 
+if systemctl cat zerolab-network.service >/dev/null 2>&1; then
+    sudo systemctl stop zerolab-network.service
+fi
+
 sudo install -Dm 0755 "$REPO_ROOT/deploy/zerolab-network-config" /usr/local/libexec/zerolab-network-config
 sudo install -Dm 0644 "$REPO_ROOT/deploy/config/zerolab-network" /etc/default/zerolab-network
 sudo install -Dm 0644 "$REPO_ROOT/deploy/systemd/zerolab-network.service" /etc/systemd/system/zerolab-network.service
@@ -76,7 +80,8 @@ sudo install -Dm 0644 "$REPO_ROOT/deploy/systemd/zerolab-hardware.service.d/10-n
 
 sudo systemd-analyze verify /etc/systemd/system/zerolab-network.service
 sudo systemctl daemon-reload
-sudo systemctl enable --now zerolab-network.service
+sudo systemctl enable zerolab-network.service
+sudo systemctl restart zerolab-network.service
 systemctl is-active zerolab-network.service
 ~~~
 

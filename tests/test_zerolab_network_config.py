@@ -18,6 +18,36 @@ def test_packaged_default_is_direct():
     assert text.strip() == "ZEROLAB_NETWORK_MODE=direct"
 
 
+def test_deployment_install_restarts_an_already_active_network_service():
+    text = (ROOT / "deploy/README-zerolab-network.md").read_text(
+        encoding="utf-8"
+    )
+    install_block = text.split(
+        "## Back up and install", maxsplit=1
+    )[1].split("~~~bash", maxsplit=1)[1].split("~~~", maxsplit=1)[0]
+
+    old_unit_check = (
+        "if systemctl cat zerolab-network.service >/dev/null 2>&1; then"
+    )
+    stop = "sudo systemctl stop zerolab-network.service"
+    first_install = (
+        'sudo install -Dm 0755 "$REPO_ROOT/deploy/zerolab-network-config" '
+        "/usr/local/libexec/zerolab-network-config"
+    )
+    daemon_reload = "sudo systemctl daemon-reload"
+    enable = "sudo systemctl enable zerolab-network.service"
+    restart = "sudo systemctl restart zerolab-network.service"
+    active = "systemctl is-active zerolab-network.service"
+
+    assert "sudo systemctl enable --now zerolab-network.service" not in install_block
+    assert install_block.index(old_unit_check) < install_block.index(stop)
+    assert install_block.index(stop) < install_block.index(first_install)
+    assert install_block.index(first_install) < install_block.index(daemon_reload)
+    assert install_block.index(daemon_reload) < install_block.index(enable)
+    assert install_block.index(enable) < install_block.index(restart)
+    assert install_block.index(restart) < install_block.rindex(active)
+
+
 def test_deployment_guide_covers_modes_safety_and_rollback():
     text = (ROOT / "deploy/README-zerolab-network.md").read_text(
         encoding="utf-8"
