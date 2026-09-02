@@ -1,0 +1,120 @@
+#!/bin/bash
+set -eu
+
+ACTION=${1:-}
+MODE=${ZEROLAB_NETWORK_MODE:-direct}
+IP_BIN=${ZEROLAB_IP_BIN:-/usr/sbin/ip}
+SYSCTL_BIN=${ZEROLAB_SYSCTL_BIN:-/usr/sbin/sysctl}
+SYSTEMD_NOTIFY_BIN=${ZEROLAB_SYSTEMD_NOTIFY_BIN:-/usr/bin/systemd-notify}
+STATE_DIR=${ZEROLAB_NETWORK_STATE_DIR:-/run/zerolab-network}
+RECONCILE_SECONDS=${ZEROLAB_RECONCILE_SECONDS:-1}
+
+usage() {
+    printf 'usage: %s {start|stop|run}\n' "$0" >&2
+}
+
+validate_mode() {
+    case "$MODE" in
+        ""|direct)
+            MODE=direct
+            ;;
+        alias)
+            printf 'alias mode is not implemented\n' >&2
+            return 1
+            ;;
+        *)
+            printf 'expected direct or alias\n' >&2
+            return 2
+            ;;
+    esac
+}
+
+validate_state_dir() {
+    case "$STATE_DIR" in
+        /run/*|/tmp/*)
+            ;;
+        *)
+            printf 'state directory must be under /run/* or /tmp/*\n' >&2
+            return 2
+            ;;
+    esac
+}
+
+validate_reconcile_seconds() {
+    case "$RECONCILE_SECONDS" in
+        ''|*[!0-9.]*|.*.*|*.*.*)
+            printf 'reconciliation interval must be positive\n' >&2
+            return 2
+            ;;
+    esac
+    if ! awk "BEGIN { exit !($RECONCILE_SECONDS > 0) }" </dev/null; then
+        printf 'reconciliation interval must be positive\n' >&2
+        return 2
+    fi
+}
+
+cleanup_saved_state() {
+    # Direct mode owns no network state in this baseline.
+    if [[ ! -d "$STATE_DIR" ]]; then
+        return 0
+    fi
+    return 0
+}
+
+start_network() {
+    case "$MODE" in
+        direct)
+            return 0
+            ;;
+        alias)
+            printf 'alias mode is not implemented\n' >&2
+            return 1
+            ;;
+    esac
+}
+
+stop_network() {
+    case "$MODE" in
+        direct)
+            return 0
+            ;;
+        alias)
+            printf 'alias mode is not implemented\n' >&2
+            return 1
+            ;;
+    esac
+}
+
+run_network() {
+    validate_reconcile_seconds
+    start_network
+    "$SYSTEMD_NOTIFY_BIN" --ready
+    trap 'exit 0' INT TERM
+    while :; do
+        sleep "$RECONCILE_SECONDS"
+    done
+}
+
+case "$ACTION" in
+    start|stop|run)
+        ;;
+    *)
+        usage
+        exit 2
+        ;;
+esac
+
+validate_mode
+validate_state_dir
+
+case "$ACTION" in
+    start)
+        start_network
+        ;;
+    stop)
+        stop_network
+        ;;
+    run)
+        run_network
+        ;;
+esac
