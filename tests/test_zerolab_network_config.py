@@ -203,11 +203,18 @@ class Fixture:
     command_log: Path
     notify_log: Path
     address_state: Path
+    ordinary_address_state: Path
+    carrier_state: Path
     arp_state: Path
     ip_failure_control: Path
 
 
-def _fake_ip(path: Path, log: Path, address_state: Path) -> None:
+def _fake_ip(
+    path: Path,
+    log: Path,
+    address_state: Path,
+    ordinary_address_state: Path,
+) -> None:
     path.write_text(
         "#!/bin/sh\n"
         "set -eu\n"
@@ -223,6 +230,11 @@ def _fake_ip(path: Path, log: Path, address_state: Path) -> None:
         "      exit 1\n"
         "    fi\n"
         "    interface=$5\n"
+        "    while IFS=' ' read -r address entry_interface; do\n"
+        "      if [ \"$entry_interface\" = \"$interface\" ]; then\n"
+        "        printf '    inet %%s scope global\\n' \"$address\"\n"
+        "      fi\n"
+        "    done < %s\n"
         "    while IFS=' ' read -r address entry_interface; do\n"
         "      if [ \"$entry_interface\" = \"$interface\" ]; then\n"
         "        printf '    inet %%s scope global\\n' \"$address\"\n"
@@ -259,7 +271,12 @@ def _fake_ip(path: Path, log: Path, address_state: Path) -> None:
         "  *)\n"
         "    exit 2\n"
         "    ;;\n"
-        "esac\n" % (shlex.quote(str(log)), shlex.quote(str(address_state))),
+        "esac\n"
+        % (
+            shlex.quote(str(log)),
+            shlex.quote(str(address_state)),
+            shlex.quote(str(ordinary_address_state)),
+        ),
         encoding="utf-8",
     )
     path.chmod(0o755)
@@ -310,14 +327,20 @@ def make_fixture(tmp_path: Path, mode: str | None) -> Fixture:
     command_log = tmp_path / "commands.log"
     notify_log = tmp_path / "notify.log"
     address_state = tmp_path / "addresses"
+    ordinary_address_state = tmp_path / "ordinary-addresses"
+    sys_class_net = tmp_path / "sys-class-net"
+    carrier_state = sys_class_net / "enp-test" / "carrier"
     arp_state = tmp_path / "arp_ignore"
     ip_failure_control = tmp_path / "ip-failure-action"
     ip = tmp_path / "ip"
     sysctl = tmp_path / "sysctl"
     notify = tmp_path / "systemd-notify"
     address_state.write_text("", encoding="utf-8")
+    carrier_state.parent.mkdir(parents=True)
+    carrier_state.write_text("1\n", encoding="utf-8")
+    ordinary_address_state.write_text("10.0.0.10/24 enp-test\n", encoding="utf-8")
     arp_state.write_text("0\n", encoding="utf-8")
-    _fake_ip(ip, command_log, address_state)
+    _fake_ip(ip, command_log, address_state, ordinary_address_state)
     _fake_sysctl(sysctl, command_log, arp_state)
     _fake_notify(notify, notify_log)
 
@@ -332,6 +355,7 @@ def make_fixture(tmp_path: Path, mode: str | None) -> Fixture:
             "ZEROLAB_SYSCTL_BIN": str(sysctl),
             "ZEROLAB_SYSTEMD_NOTIFY_BIN": str(notify),
             "ZEROLAB_NETWORK_STATE_DIR": str(tmp_path / "state"),
+            "ZEROLAB_SYS_CLASS_NET_ROOT": str(sys_class_net),
             "ZEROLAB_RECONCILE_SECONDS": "0.01",
             "ZEROLAB_FAKE_IP_FAIL_ACTION_FILE": str(ip_failure_control),
         }
@@ -341,6 +365,8 @@ def make_fixture(tmp_path: Path, mode: str | None) -> Fixture:
         command_log=command_log,
         notify_log=notify_log,
         address_state=address_state,
+        ordinary_address_state=ordinary_address_state,
+        carrier_state=carrier_state,
         arp_state=arp_state,
         ip_failure_control=ip_failure_control,
     )
@@ -372,6 +398,15 @@ def set_addresses(fixture: Fixture, *entries: str) -> None:
     fixture.address_state.write_text(
         "".join(f"{entry}\n" for entry in entries), encoding="utf-8"
     )
+
+
+def set_ordinary_addresses(fixture: Fixture, *entries: str) -> None:
+    text = "".join(f"{entry}\n" for entry in entries)
+    fixture.ordinary_address_state.write_text(text, encoding="utf-8")
+
+
+def set_carrier(fixture: Fixture, up: bool) -> None:
+    fixture.carrier_state.write_text("1\n" if up else "0\n", encoding="utf-8")
 
 
 def arp_ignore(fixture: Fixture) -> str:
@@ -453,6 +488,7 @@ def wait_until(predicate, timeout: float = 2.0) -> bool:
 
 def test_missing_mode_defaults_to_direct_without_network_commands(tmp_path):
     fixture = make_fixture(tmp_path, mode=None)
+    fixture.carrier_state.unlink()
     assert run_helper(fixture, "start").returncode == 0
     assert run_helper(fixture, "stop").returncode == 0
     assert not fixture.command_log.exists()
@@ -571,6 +607,31 @@ def test_alias_adds_custom_ip_as_exact_slash_32(tmp_path):
     assert saved_state(fixture) == expected_saved_state("0", "added")
     assert state.stat().st_mode & 0o077 == 0
     assert all(entry.stat().st_mode & 0o077 == 0 for entry in state.iterdir())
+
+
+def test_alias_start_waits_with_carrier_down(tmp_path):
+    fixture = alias_fixture(tmp_path)
+    set_carrier(fixture, False)
+
+    result = run_helper(fixture, "start")
+
+    assert result.returncode == 0
+    assert addresses(fixture) == set()
+    assert arp_ignore(fixture) == "1"
+    assert saved_state(fixture) == expected_saved_state("0", "added")
+    assert "waiting for ordinary Ethernet network" in result.stderr
+
+
+def test_alias_start_waits_without_ordinary_ipv4(tmp_path):
+    fixture = alias_fixture(tmp_path)
+    set_ordinary_addresses(fixture)
+
+    result = run_helper(fixture, "start")
+
+    assert result.returncode == 0
+    assert addresses(fixture) == set()
+    assert arp_ignore(fixture) == "1"
+    assert saved_state(fixture) == expected_saved_state("0", "added")
 
 
 def test_alias_rejects_cidr_input(tmp_path):

@@ -4,6 +4,7 @@ set -eu
 ACTION=${1:-}
 MODE=${ZEROLAB_NETWORK_MODE:-direct}
 IP_BIN=${ZEROLAB_IP_BIN:-/usr/sbin/ip}
+SYS_CLASS_NET_ROOT=${ZEROLAB_SYS_CLASS_NET_ROOT:-/sys/class/net}
 SYSCTL_BIN=${ZEROLAB_SYSCTL_BIN:-/usr/sbin/sysctl}
 SYSTEMD_NOTIFY_BIN=${ZEROLAB_SYSTEMD_NOTIFY_BIN:-/usr/bin/systemd-notify}
 STATE_DIR=${ZEROLAB_NETWORK_STATE_DIR:-/run/zerolab-network}
@@ -12,6 +13,8 @@ ALIAS_ADDRESS=
 ALIAS_ETH=
 ALIAS_WIFI=
 ALIAS_ADDRESS_ORIGIN=
+INSPECTED_ALIAS_PRESENT=0
+INSPECTED_ORDINARY_IPV4_PRESENT=0
 
 usage() {
     printf 'usage: %s {start|stop|run}\n' "$0" >&2
@@ -221,7 +224,7 @@ state_file_is_trusted() {
     path_is_owned_and_restricted "$1" file private
 }
 
-address_present() {
+inspect_interface_addresses() {
     local address=$1
     local interface=$2
     local output
@@ -231,12 +234,47 @@ address_present() {
         printf 'failed to inspect saved alias address\n' >&2
         return 2
     fi
+    INSPECTED_ALIAS_PRESENT=0
+    INSPECTED_ORDINARY_IPV4_PRESENT=0
     if printf '%s\n' "$output" | awk -v address="$address" \
         '$1 == "inet" && $2 == address { found = 1 } END { exit !found }'
     then
-        return 0
+        INSPECTED_ALIAS_PRESENT=1
     fi
-    return 1
+    if printf '%s\n' "$output" | awk -v address="$address" \
+        '$1 == "inet" && $2 != address { found = 1 } END { exit !found }'
+    then
+        INSPECTED_ORDINARY_IPV4_PRESENT=1
+    fi
+}
+
+address_present() {
+    inspect_interface_addresses "$1" "$2" || return $?
+    [[ "$INSPECTED_ALIAS_PRESENT" = 1 ]]
+}
+
+alias_interface_ready() {
+    local interface=$1
+    local carrier_file="$SYS_CLASS_NET_ROOT/$interface/carrier"
+    local carrier
+
+    valid_interface "$interface" || return 2
+    if ! IFS= read -r carrier < "$carrier_file"; then
+        printf 'failed to inspect Ethernet carrier\n' >&2
+        return 2
+    fi
+    case "$carrier" in
+        0)
+            return 1
+            ;;
+        1)
+            ;;
+        *)
+            printf 'invalid Ethernet carrier state\n' >&2
+            return 2
+            ;;
+    esac
+    [[ "$INSPECTED_ORDINARY_IPV4_PRESENT" = 1 ]]
 }
 
 read_state_value() {
@@ -637,6 +675,7 @@ reconcile_alias() {
 
 start_alias() {
     local arp_key
+    local readiness_status
 
     validate_alias_config || return $?
     prepare_alias_state || return 1
@@ -645,11 +684,20 @@ start_alias() {
         printf 'saved state is not trusted before alias add\n' >&2
         return 1
     fi
-    if [[ "$ALIAS_ADDRESS_ORIGIN" = added ]]; then
-        if ! "$IP_BIN" address add "$ALIAS_ADDRESS" dev "$ALIAS_ETH"; then
-            printf 'failed to add alias address\n' >&2
-            discard_unconfirmed_add_state || true
-            return 1
+    if alias_interface_ready "$ALIAS_ETH"; then
+        if [[ "$ALIAS_ADDRESS_ORIGIN" = added ]]; then
+            if ! "$IP_BIN" address add "$ALIAS_ADDRESS" dev "$ALIAS_ETH"; then
+                printf 'failed to add alias address\n' >&2
+                discard_unconfirmed_add_state || true
+                return 1
+            fi
+        fi
+    else
+        readiness_status=$?
+        if [[ $readiness_status -eq 1 || $readiness_status -eq 2 ]]; then
+            printf 'waiting for ordinary Ethernet network\n' >&2
+        else
+            return "$readiness_status"
         fi
     fi
 
