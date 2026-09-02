@@ -144,8 +144,12 @@ to complete cleanup.
 
 ## Error Handling and Logging
 
-- Failure to inspect link state or ordinary IPv4 addresses is treated as
-  "not ready." The helper does not add an alias on uncertain evidence.
+- Initial failure to inspect interface addresses remains fatal because the
+  helper cannot safely classify the configured alias as preexisting or
+  service-owned.
+- After a trusted ownership snapshot exists, failure to inspect link state or
+  interface addresses causes no address mutation and is retried. A known
+  carrier-down or ordinary-address-missing result is treated as "not ready."
 - A failed address add or delete returns a reconciliation failure and is retried
   on the next cycle without replacing the rollback snapshot.
 - Logs distinguish waiting, temporary withdrawal, restoration, and command
