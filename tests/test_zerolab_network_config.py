@@ -12,6 +12,32 @@ ROOT = Path(__file__).resolve().parents[1]
 HELPER = ROOT / "deploy" / "zerolab-network-config"
 
 
+def test_packaged_default_is_direct():
+    text = (ROOT / "deploy/config/zerolab-network").read_text()
+    assert text.strip() == "ZEROLAB_NETWORK_MODE=direct"
+
+
+def test_network_unit_uses_optional_config_and_notify_supervisor():
+    text = (ROOT / "deploy/systemd/zerolab-network.service").read_text()
+    assert "Type=notify" in text
+    assert "NotifyAccess=main" in text
+    assert "EnvironmentFile=-/etc/default/zerolab-network" in text
+    assert "ExecStart=/usr/local/libexec/zerolab-network-config run" in text
+    assert "Restart=on-failure" in text
+    assert "RemainAfterExit=" not in text
+    assert "ExecStartPre=/usr/bin/test -d /sys/class/net/" not in text
+
+
+def test_hardware_drop_in_keeps_network_non_blocking():
+    text = (
+        ROOT / "deploy/systemd/zerolab-hardware.service.d/10-network.conf"
+    ).read_text()
+    assert "Wants=zerolab-network.service" in text
+    assert "After=zerolab-network.service" in text
+    assert "Requires=zerolab-network.service" not in text
+    assert "ExecStart" not in text
+
+
 @dataclass
 class Fixture:
     env: dict[str, str]
