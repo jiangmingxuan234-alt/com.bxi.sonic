@@ -300,6 +300,19 @@ def test_state_directory_rejects_symlinked_ancestor(tmp_path):
     assert commands(fixture) == []
 
 
+def test_state_directory_rejects_symlinked_final_component(tmp_path):
+    fixture = make_fixture(tmp_path, mode="direct")
+    state_link = tmp_path / "state-link"
+    state_link.symlink_to(tmp_path / "redirected-state")
+    fixture.env["ZEROLAB_NETWORK_STATE_DIR"] = str(state_link)
+
+    result = run_helper(fixture, "start")
+
+    assert result.returncode == 2
+    assert "state directory must be under /run/* or /tmp/*" in result.stderr
+    assert commands(fixture) == []
+
+
 def test_direct_run_notifies_ready_and_stays_active(tmp_path):
     fixture = make_fixture(tmp_path, mode="direct")
     process = start_helper(fixture, "run")

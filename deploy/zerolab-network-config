@@ -49,6 +49,10 @@ validate_state_dir() {
             return 2
             ;;
     esac
+    if [[ -L "$STATE_DIR" ]]; then
+        printf 'state directory must be under /run/* or /tmp/*\n' >&2
+        return 2
+    fi
     if ! resolved_state_dir=$(realpath -m -- "$STATE_DIR"); then
         printf 'state directory must be under /run/* or /tmp/*\n' >&2
         return 2
