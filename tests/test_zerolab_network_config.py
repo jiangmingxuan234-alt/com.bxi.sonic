@@ -41,6 +41,48 @@ def test_deployment_guide_covers_modes_safety_and_rollback():
     direct_section = text.split("## Alias mode", maxsplit=1)[0]
     assert "mod.yaml" not in direct_section
 
+    def first_shell_block_after(marker: str) -> str:
+        after_marker = text.split(marker, maxsplit=1)[1]
+        return after_marker.split("~~~bash", maxsplit=1)[1].split(
+            "~~~", maxsplit=1
+        )[0]
+
+    for marker in [
+        "## Back up and install",
+        "## Direct mode",
+        "Write the explicit alias configuration",
+        "## Switch back to direct",
+        "### Stop the network service",
+        "## Restore the backup",
+    ]:
+        assert "set -Eeuo pipefail" in first_shell_block_after(marker)
+
+    for required_text in [
+        'if [ -e "$BACKUP_DIR" ] || [ -L "$BACKUP_DIR" ]; then',
+        "snapshot_service_state()",
+        "systemctl is-enabled zerolab-network.service",
+        "systemctl is-active zerolab-network.service",
+        "$BACKUP_DIR/zerolab-network.enabled",
+        "$BACKUP_DIR/zerolab-network.active",
+        "restore_service_state()",
+        "sudo systemctl enable zerolab-network.service",
+        "sudo systemctl disable zerolab-network.service",
+        "sudo systemctl start zerolab-network.service",
+        'sudo cp -a -- "$BACKUP_DIR/$backup_name" "$target_file"',
+    ]:
+        assert required_text in text
+
+    rollback_section = text.split("## Restore the backup", maxsplit=1)[1]
+    assert rollback_section.index("sudo systemctl stop zerolab-network.service") < rollback_section.index(
+        "sudo cp -a"
+    )
+    assert rollback_section.index("sudo systemctl stop zerolab-network.service") < rollback_section.index(
+        "sudo rm -f"
+    )
+    assert rollback_section.index("sudo systemctl daemon-reload") < (
+        rollback_section.index("restore_service_state")
+    )
+
 
 def test_network_unit_uses_optional_config_and_notify_supervisor():
     text = (ROOT / "deploy/systemd/zerolab-network.service").read_text()

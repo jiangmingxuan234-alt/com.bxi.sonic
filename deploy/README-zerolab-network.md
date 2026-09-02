@@ -9,6 +9,8 @@ Do this while the robot is safely supported and with an operator ready to use PD
 Set the repository and a dedicated backup destination explicitly. These are customer paths, so the parameter checks intentionally stop an incomplete copy/paste instead of guessing.
 
 ~~~bash
+set -Eeuo pipefail
+
 REPO_ROOT=${REPO_ROOT:?Set REPO_ROOT to this checked-out repository}
 BACKUP_DIR=${BACKUP_DIR:?Set BACKUP_DIR to a new dedicated backup directory}
 test -f "$REPO_ROOT/deploy/zerolab-network-config"
@@ -16,13 +18,35 @@ test -f "$REPO_ROOT/deploy/config/zerolab-network"
 test -f "$REPO_ROOT/deploy/systemd/zerolab-network.service"
 test -f "$REPO_ROOT/deploy/systemd/zerolab-hardware.service.d/10-network.conf"
 
+if [ -e "$BACKUP_DIR" ] || [ -L "$BACKUP_DIR" ]; then
+    printf 'BACKUP_DIR must not already exist: %s\n' "$BACKUP_DIR" >&2
+    exit 1
+fi
 sudo install -d -m 0700 "$BACKUP_DIR"
-sudo sh -c ': > "$1"' sh "$BACKUP_DIR/present"
+sudo install -m 0600 /dev/null "$BACKUP_DIR/present"
+
+snapshot_service_state() {
+    enabled_state=$(systemctl is-enabled zerolab-network.service 2>/dev/null || true)
+    active_state=$(systemctl is-active zerolab-network.service 2>/dev/null || true)
+    case "$enabled_state:$active_state" in
+        enabled:active|enabled:inactive|disabled:active|disabled:inactive|not-found:inactive)
+            ;;
+        *)
+            printf 'unsupported prior zerolab-network.service state: enabled=%s active=%s\n' \
+                "$enabled_state" "$active_state" >&2
+            exit 1
+            ;;
+    esac
+    printf '%s\n' "$enabled_state" | sudo tee "$BACKUP_DIR/zerolab-network.enabled" >/dev/null
+    printf '%s\n' "$active_state" | sudo tee "$BACKUP_DIR/zerolab-network.active" >/dev/null
+}
+
+snapshot_service_state
 
 backup_one() {
     source_file=$1
     backup_name=$2
-    if sudo test -e "$source_file"; then
+    if sudo test -e "$source_file" || sudo test -L "$source_file"; then
         sudo cp -a -- "$source_file" "$BACKUP_DIR/$backup_name"
         printf '%s\n' "$backup_name" | sudo tee -a "$BACKUP_DIR/present" >/dev/null
     fi
@@ -51,6 +75,8 @@ The helper is executable (0755); the configuration, unit, and hardware drop-in a
 The installation already writes ZEROLAB_NETWORK_MODE=direct. Direct users do not need to change any network configuration. Prove its no-op network contract by recording the actual receiving interfaces before a restart:
 
 ~~~bash
+set -Eeuo pipefail
+
 ZEROLAB_ETH=${ZEROLAB_ETH:?Set ZEROLAB_ETH to the robot receiving Ethernet interface}
 ZEROLAB_WIFI=${ZEROLAB_WIFI:?Set ZEROLAB_WIFI to the robot Wi-Fi interface}
 
@@ -95,6 +121,8 @@ alias_arp_ignore_before=$(sysctl -n "net.ipv4.conf.${ZEROLAB_WIFI}.arp_ignore")
 Write the explicit alias configuration, then restart the supervisor:
 
 ~~~bash
+set -Eeuo pipefail
+
 sudo tee /etc/default/zerolab-network >/dev/null <<EOF
 ZEROLAB_NETWORK_MODE=alias
 ZEROLAB_ALIAS_IP=$ZEROLAB_ALIAS_IP
@@ -120,6 +148,8 @@ journalctl -u zerolab-network.service --since '-5 minutes' --no-pager
 This mode switch cleans the service's saved alias state. It removes the alias only if this service added it and restores the recorded prior arp_ignore; it preserves a pre-existing alias address.
 
 ~~~bash
+set -Eeuo pipefail
+
 sudo tee /etc/default/zerolab-network >/dev/null <<'EOF'
 ZEROLAB_NETWORK_MODE=direct
 EOF
@@ -144,41 +174,106 @@ If the network service fails, inspect its status and journal. The non-blocking o
 ~~~bash
 systemctl status zerolab-network.service --no-pager
 journalctl -u zerolab-network.service --since '-15 minutes' --no-pager
+~~~
+
+### Stop the network service
+
+Stopping is a separate fail-closed action and is also the safe first step
+before restoring the prior deployment.
+
+~~~bash
+set -Eeuo pipefail
+
 sudo systemctl stop zerolab-network.service
 ~~~
 
-Stopping the service is also the safe first step before restoring the prior deployment.
-
 ## Restore the backup
 
-Use the same guarded backup directory. The function restores a file only when it existed before this deployment; otherwise it removes only that explicitly installed file. It uses no recursive or wildcard deletion.
+Use the same guarded backup directory. The installer records the exact output
+of systemctl is-enabled and systemctl is-active in
+zerolab-network.enabled and zerolab-network.active. It supports
+enabled/disabled paired with active/inactive, plus not-found/inactive for a
+fresh installation. Any other pre-install result is rejected before files are
+changed. The function restores a file only when it existed before this
+deployment; otherwise it removes only that explicitly installed file. It uses
+no recursive or wildcard deletion.
 
 ~~~bash
+set -Eeuo pipefail
+
 BACKUP_DIR=${BACKUP_DIR:?Set BACKUP_DIR to the backup directory created above}
+test -d "$BACKUP_DIR"
+test ! -L "$BACKUP_DIR"
+test -f "$BACKUP_DIR/present"
+test -f "$BACKUP_DIR/zerolab-network.enabled"
+test -f "$BACKUP_DIR/zerolab-network.active"
+
+previous_enabled=$(sudo cat "$BACKUP_DIR/zerolab-network.enabled")
+previous_active=$(sudo cat "$BACKUP_DIR/zerolab-network.active")
+case "$previous_enabled:$previous_active" in
+    enabled:active|enabled:inactive|disabled:active|disabled:inactive|not-found:inactive)
+        ;;
+    *)
+        printf 'invalid saved zerolab-network.service state: enabled=%s active=%s\n' \
+            "$previous_enabled" "$previous_active" >&2
+        exit 1
+        ;;
+esac
+
+# A failed stop exits this block before any helper, unit, or drop-in removal.
 sudo systemctl stop zerolab-network.service
 
-# Remove this deployment's enablement before removing an originally absent unit.
-if ! sudo grep -Fx -- zerolab-network.service "$BACKUP_DIR/present" >/dev/null; then
-    sudo systemctl disable zerolab-network.service
-fi
+# Remove this deployment's enablement before removing an originally disabled
+# or absent unit. An originally enabled unit is restored after daemon-reload.
+case "$previous_enabled" in
+    disabled|not-found)
+        sudo systemctl disable zerolab-network.service
+        ;;
+    enabled)
+        ;;
+esac
 
 restore_one() {
     backup_name=$1
     target_file=$2
-    target_mode=$3
     if sudo grep -Fx -- "$backup_name" "$BACKUP_DIR/present" >/dev/null; then
-        sudo install -Dm "$target_mode" "$BACKUP_DIR/$backup_name" "$target_file"
+        sudo cp -a -- "$BACKUP_DIR/$backup_name" "$target_file"
     else
         sudo rm -f -- "$target_file"
     fi
 }
 
-restore_one etc-default-zerolab-network /etc/default/zerolab-network 0644
-restore_one zerolab-network-config /usr/local/libexec/zerolab-network-config 0755
-restore_one zerolab-network.service /etc/systemd/system/zerolab-network.service 0644
-restore_one zerolab-hardware-10-network.conf /etc/systemd/system/zerolab-hardware.service.d/10-network.conf 0644
+restore_one etc-default-zerolab-network /etc/default/zerolab-network
+restore_one zerolab-network-config /usr/local/libexec/zerolab-network-config
+restore_one zerolab-network.service /etc/systemd/system/zerolab-network.service
+restore_one zerolab-hardware-10-network.conf /etc/systemd/system/zerolab-hardware.service.d/10-network.conf
 
 sudo systemctl daemon-reload
+
+restore_service_state() {
+    case "$previous_enabled" in
+        enabled)
+            sudo systemctl enable zerolab-network.service
+            ;;
+        disabled)
+            sudo systemctl disable zerolab-network.service
+            ;;
+        not-found)
+            # The original unit was absent; stop/disable happened before removal.
+            return 0
+            ;;
+    esac
+    case "$previous_active" in
+        active)
+            sudo systemctl start zerolab-network.service
+            ;;
+        inactive)
+            sudo systemctl stop zerolab-network.service
+            ;;
+    esac
+}
+
+restore_service_state
 ~~~
 
 Keep the backup directory until the restored deployment has been checked. Do not remove service directories: these commands address only the four files installed by this guide.
