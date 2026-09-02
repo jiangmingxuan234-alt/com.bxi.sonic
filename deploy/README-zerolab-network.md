@@ -131,7 +131,7 @@ ZEROLAB_ETH=${ZEROLAB_ETH:?Set ZEROLAB_ETH to the Ethernet interface receiving Z
 ZEROLAB_ALIAS_IP=${ZEROLAB_ALIAS_IP:?Set ZEROLAB_ALIAS_IP to the customer-selected alias}
 
 ip -o -4 address show dev "$ZEROLAB_ETH" | grep -v -F -- "${ZEROLAB_ALIAS_IP}/32"
-ip -o -4 address show dev "$ZEROLAB_ETH" | grep -Fx -- "${ZEROLAB_ALIAS_IP}/32"
+ip -o -4 address show dev "$ZEROLAB_ETH" | awk '{print $4}' | grep -Fx -- "${ZEROLAB_ALIAS_IP}/32"
 ~~~
 
 If carrier or the ordinary IPv4 address is lost, the service-owned alias is

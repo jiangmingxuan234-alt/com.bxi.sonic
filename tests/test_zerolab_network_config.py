@@ -40,6 +40,14 @@ def test_deployment_guide_covers_modes_safety_and_rollback():
     ]:
         assert required_text in text
 
+    verification_block = text.split(
+        "The ordinary address and the service-owned alias are separate.",
+        maxsplit=1,
+    )[1].split("~~~bash", maxsplit=1)[1].split("~~~", maxsplit=1)[0]
+    assert 'grep -v -F -- "${ZEROLAB_ALIAS_IP}/32"' in verification_block
+    assert "awk '{print $4}'" in verification_block
+    assert 'grep -Fx -- "${ZEROLAB_ALIAS_IP}/32"' in verification_block
+
     assert "192.168.88.213" not in text
 
     direct_section = text.split("## Alias mode", maxsplit=1)[0]
