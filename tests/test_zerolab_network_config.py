@@ -45,8 +45,14 @@ def test_deployment_guide_covers_modes_safety_and_rollback():
         maxsplit=1,
     )[1].split("~~~bash", maxsplit=1)[1].split("~~~", maxsplit=1)[0]
     assert 'grep -v -F -- "${ZEROLAB_ALIAS_IP}/32"' in verification_block
-    assert "awk '{print $4}'" in verification_block
-    assert 'grep -Fx -- "${ZEROLAB_ALIAS_IP}/32"' in verification_block
+    alias_check_lines = [
+        line.strip()
+        for line in verification_block.splitlines()
+        if 'grep -Fx -- "${ZEROLAB_ALIAS_IP}/32"' in line
+    ]
+    assert alias_check_lines == [
+        "ip -o -4 address show dev \"$ZEROLAB_ETH\" | awk '{print $4}' | grep -Fx -- \"${ZEROLAB_ALIAS_IP}/32\""
+    ]
 
     assert "192.168.88.213" not in text
 
