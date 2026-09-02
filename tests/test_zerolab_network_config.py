@@ -29,6 +29,9 @@ def _fake_ip(path: Path, log: Path, address_state: Path) -> None:
         "state=%s\n"
         "case \"$*\" in\n"
         "  '-4 address show dev '*)\n"
+        "    if [ \"${ZEROLAB_FAKE_IP_FAIL_ACTION:-}\" = show ]; then\n"
+        "      exit 1\n"
+        "    fi\n"
         "    interface=$5\n"
         "    while IFS=' ' read -r address entry_interface; do\n"
         "      if [ \"$entry_interface\" = \"$interface\" ]; then\n"
@@ -37,6 +40,9 @@ def _fake_ip(path: Path, log: Path, address_state: Path) -> None:
         "    done < \"$state\"\n"
         "    ;;\n"
         "  'address add '*)\n"
+        "    if [ \"${ZEROLAB_FAKE_IP_FAIL_ACTION:-}\" = add ]; then\n"
+        "      exit 1\n"
+        "    fi\n"
         "    address=$3\n"
         "    interface=$5\n"
         "    if grep -Fqx \"$address $interface\" \"$state\"; then\n"
@@ -45,6 +51,9 @@ def _fake_ip(path: Path, log: Path, address_state: Path) -> None:
         "    printf '%%s %%s\\n' \"$address\" \"$interface\" >> \"$state\"\n"
         "    ;;\n"
         "  'address del '*)\n"
+        "    if [ \"${ZEROLAB_FAKE_IP_FAIL_ACTION:-}\" = del ]; then\n"
+        "      exit 1\n"
+        "    fi\n"
         "    address=$3\n"
         "    interface=$5\n"
         "    temporary=$state.new\n"
@@ -76,6 +85,9 @@ def _fake_sysctl(path: Path, log: Path, arp_state: Path) -> None:
         "      ''|*[!0-9]*) exit 2 ;;\n"
         "    esac\n"
         "    if [ \"$value\" = 1 ] && [ \"${ZEROLAB_FAKE_SYSCTL_FAIL_SET:-0}\" = 1 ]; then\n"
+        "      exit 1\n"
+        "    fi\n"
+        "    if [ -n \"${ZEROLAB_FAKE_SYSCTL_FAIL_VALUE:-}\" ] && [ \"$value\" = \"${ZEROLAB_FAKE_SYSCTL_FAIL_VALUE}\" ]; then\n"
         "      exit 1\n"
         "    fi\n"
         "    printf '%%s\\n' \"$value\" > \"$state\"\n"
@@ -185,6 +197,27 @@ def write_saved_state(fixture: Fixture, **overrides: str) -> None:
         (state / name).write_text(f"{value}\n", encoding="utf-8")
 
 
+def saved_state(fixture: Fixture) -> dict[str, str]:
+    state = Path(fixture.env["ZEROLAB_NETWORK_STATE_DIR"])
+    return {
+        entry.name: entry.read_text(encoding="utf-8")
+        for entry in state.iterdir()
+    }
+
+
+def expected_saved_state(arp_ignore_old: str, origin: str) -> dict[str, str]:
+    return {
+        "schema": "1\n",
+        "mode": "alias\n",
+        "address": "192.168.50.27/32\n",
+        "eth": "enp-test\n",
+        "wifi": "wlan-test\n",
+        "arp_ignore.old": f"{arp_ignore_old}\n",
+        "address.origin": f"{origin}\n",
+        "active": "1\n",
+    }
+
+
 def run_helper(fixture: Fixture, action: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [str(HELPER), action],
@@ -279,6 +312,10 @@ def test_alias_adds_custom_ip_as_exact_slash_32(tmp_path):
     ]
     assert addresses(fixture) == {"192.168.50.27/32 enp-test"}
     assert arp_ignore(fixture) == "1"
+    state = Path(fixture.env["ZEROLAB_NETWORK_STATE_DIR"])
+    assert saved_state(fixture) == expected_saved_state("0", "added")
+    assert state.stat().st_mode & 0o077 == 0
+    assert all(entry.stat().st_mode & 0o077 == 0 for entry in state.iterdir())
 
 
 def test_alias_rejects_cidr_input(tmp_path):
@@ -360,6 +397,175 @@ def test_alias_sysctl_failure_removes_service_added_address(tmp_path):
         "sysctl -n net.ipv4.conf.wlan-test.arp_ignore",
         "ip address add 192.168.50.27/32 dev enp-test",
         "sysctl -w net.ipv4.conf.wlan-test.arp_ignore=1",
+        "sysctl -w net.ipv4.conf.wlan-test.arp_ignore=7",
+        "ip -4 address show dev enp-test",
+        "ip address del 192.168.50.27/32 dev enp-test",
+    ]
+    assert addresses(fixture) == set()
+    assert arp_ignore(fixture) == "7"
+    assert not Path(fixture.env["ZEROLAB_NETWORK_STATE_DIR"]).exists()
+
+
+def test_alias_stop_retains_state_when_arp_restore_fails_then_retries(tmp_path):
+    fixture = alias_fixture(tmp_path)
+    fixture.arp_state.write_text("7\n", encoding="utf-8")
+    assert run_helper(fixture, "start").returncode == 0
+    fixture.env["ZEROLAB_FAKE_SYSCTL_FAIL_VALUE"] = "7"
+
+    failed_stop = run_helper(fixture, "stop")
+
+    assert failed_stop.returncode != 0
+    assert commands(fixture) == [
+        "ip -4 address show dev enp-test",
+        "sysctl -n net.ipv4.conf.wlan-test.arp_ignore",
+        "ip address add 192.168.50.27/32 dev enp-test",
+        "sysctl -w net.ipv4.conf.wlan-test.arp_ignore=1",
+        "sysctl -w net.ipv4.conf.wlan-test.arp_ignore=7",
+        "ip -4 address show dev enp-test",
+        "ip address del 192.168.50.27/32 dev enp-test",
+    ]
+    assert addresses(fixture) == set()
+    assert arp_ignore(fixture) == "1"
+    assert saved_state(fixture) == expected_saved_state("7", "added")
+
+    fixture.env.pop("ZEROLAB_FAKE_SYSCTL_FAIL_VALUE")
+    retry = run_helper(fixture, "stop")
+
+    assert retry.returncode == 0
+    assert commands(fixture) == [
+        "ip -4 address show dev enp-test",
+        "sysctl -n net.ipv4.conf.wlan-test.arp_ignore",
+        "ip address add 192.168.50.27/32 dev enp-test",
+        "sysctl -w net.ipv4.conf.wlan-test.arp_ignore=1",
+        "sysctl -w net.ipv4.conf.wlan-test.arp_ignore=7",
+        "ip -4 address show dev enp-test",
+        "ip address del 192.168.50.27/32 dev enp-test",
+        "sysctl -w net.ipv4.conf.wlan-test.arp_ignore=7",
+        "ip -4 address show dev enp-test",
+    ]
+    assert addresses(fixture) == set()
+    assert arp_ignore(fixture) == "7"
+    assert not Path(fixture.env["ZEROLAB_NETWORK_STATE_DIR"]).exists()
+
+
+def test_alias_stop_retains_state_when_address_delete_fails_then_retries(tmp_path):
+    fixture = alias_fixture(tmp_path)
+    fixture.arp_state.write_text("7\n", encoding="utf-8")
+    assert run_helper(fixture, "start").returncode == 0
+    fixture.env["ZEROLAB_FAKE_IP_FAIL_ACTION"] = "del"
+
+    failed_stop = run_helper(fixture, "stop")
+
+    assert failed_stop.returncode != 0
+    assert commands(fixture) == [
+        "ip -4 address show dev enp-test",
+        "sysctl -n net.ipv4.conf.wlan-test.arp_ignore",
+        "ip address add 192.168.50.27/32 dev enp-test",
+        "sysctl -w net.ipv4.conf.wlan-test.arp_ignore=1",
+        "sysctl -w net.ipv4.conf.wlan-test.arp_ignore=7",
+        "ip -4 address show dev enp-test",
+        "ip address del 192.168.50.27/32 dev enp-test",
+    ]
+    assert addresses(fixture) == {"192.168.50.27/32 enp-test"}
+    assert arp_ignore(fixture) == "7"
+    assert saved_state(fixture) == expected_saved_state("7", "added")
+
+    fixture.env.pop("ZEROLAB_FAKE_IP_FAIL_ACTION")
+    retry = run_helper(fixture, "stop")
+
+    assert retry.returncode == 0
+    assert commands(fixture) == [
+        "ip -4 address show dev enp-test",
+        "sysctl -n net.ipv4.conf.wlan-test.arp_ignore",
+        "ip address add 192.168.50.27/32 dev enp-test",
+        "sysctl -w net.ipv4.conf.wlan-test.arp_ignore=1",
+        "sysctl -w net.ipv4.conf.wlan-test.arp_ignore=7",
+        "ip -4 address show dev enp-test",
+        "ip address del 192.168.50.27/32 dev enp-test",
+        "sysctl -w net.ipv4.conf.wlan-test.arp_ignore=7",
+        "ip -4 address show dev enp-test",
+        "ip address del 192.168.50.27/32 dev enp-test",
+    ]
+    assert addresses(fixture) == set()
+    assert arp_ignore(fixture) == "7"
+    assert not Path(fixture.env["ZEROLAB_NETWORK_STATE_DIR"]).exists()
+
+
+def test_alias_stop_retains_state_when_preexisting_restore_fails_then_retries(tmp_path):
+    fixture = alias_fixture(tmp_path)
+    set_addresses(fixture, "192.168.50.27/32 enp-test")
+    fixture.arp_state.write_text("7\n", encoding="utf-8")
+    assert run_helper(fixture, "start").returncode == 0
+    set_addresses(fixture)
+    fixture.env["ZEROLAB_FAKE_IP_FAIL_ACTION"] = "add"
+
+    failed_stop = run_helper(fixture, "stop")
+
+    assert failed_stop.returncode != 0
+    assert commands(fixture) == [
+        "ip -4 address show dev enp-test",
+        "sysctl -n net.ipv4.conf.wlan-test.arp_ignore",
+        "sysctl -w net.ipv4.conf.wlan-test.arp_ignore=1",
+        "sysctl -w net.ipv4.conf.wlan-test.arp_ignore=7",
+        "ip -4 address show dev enp-test",
+        "ip address add 192.168.50.27/32 dev enp-test",
+    ]
+    assert addresses(fixture) == set()
+    assert arp_ignore(fixture) == "7"
+    assert saved_state(fixture) == expected_saved_state("7", "preexisting")
+
+    fixture.env.pop("ZEROLAB_FAKE_IP_FAIL_ACTION")
+    retry = run_helper(fixture, "stop")
+
+    assert retry.returncode == 0
+    assert commands(fixture) == [
+        "ip -4 address show dev enp-test",
+        "sysctl -n net.ipv4.conf.wlan-test.arp_ignore",
+        "sysctl -w net.ipv4.conf.wlan-test.arp_ignore=1",
+        "sysctl -w net.ipv4.conf.wlan-test.arp_ignore=7",
+        "ip -4 address show dev enp-test",
+        "ip address add 192.168.50.27/32 dev enp-test",
+        "sysctl -w net.ipv4.conf.wlan-test.arp_ignore=7",
+        "ip -4 address show dev enp-test",
+        "ip address add 192.168.50.27/32 dev enp-test",
+    ]
+    assert addresses(fixture) == {"192.168.50.27/32 enp-test"}
+    assert arp_ignore(fixture) == "7"
+    assert not Path(fixture.env["ZEROLAB_NETWORK_STATE_DIR"]).exists()
+
+
+def test_alias_stop_retains_state_when_address_inspection_fails_then_retries(tmp_path):
+    fixture = alias_fixture(tmp_path)
+    fixture.arp_state.write_text("7\n", encoding="utf-8")
+    assert run_helper(fixture, "start").returncode == 0
+    fixture.env["ZEROLAB_FAKE_IP_FAIL_ACTION"] = "show"
+
+    failed_stop = run_helper(fixture, "stop")
+
+    assert failed_stop.returncode != 0
+    assert commands(fixture) == [
+        "ip -4 address show dev enp-test",
+        "sysctl -n net.ipv4.conf.wlan-test.arp_ignore",
+        "ip address add 192.168.50.27/32 dev enp-test",
+        "sysctl -w net.ipv4.conf.wlan-test.arp_ignore=1",
+        "sysctl -w net.ipv4.conf.wlan-test.arp_ignore=7",
+        "ip -4 address show dev enp-test",
+    ]
+    assert addresses(fixture) == {"192.168.50.27/32 enp-test"}
+    assert arp_ignore(fixture) == "7"
+    assert saved_state(fixture) == expected_saved_state("7", "added")
+
+    fixture.env.pop("ZEROLAB_FAKE_IP_FAIL_ACTION")
+    retry = run_helper(fixture, "stop")
+
+    assert retry.returncode == 0
+    assert commands(fixture) == [
+        "ip -4 address show dev enp-test",
+        "sysctl -n net.ipv4.conf.wlan-test.arp_ignore",
+        "ip address add 192.168.50.27/32 dev enp-test",
+        "sysctl -w net.ipv4.conf.wlan-test.arp_ignore=1",
+        "sysctl -w net.ipv4.conf.wlan-test.arp_ignore=7",
+        "ip -4 address show dev enp-test",
         "sysctl -w net.ipv4.conf.wlan-test.arp_ignore=7",
         "ip -4 address show dev enp-test",
         "ip address del 192.168.50.27/32 dev enp-test",
@@ -459,3 +665,26 @@ def test_saved_state_values_are_validated_before_commands(tmp_path, entry, value
     assert "invalid saved state" in result.stderr
     assert commands(fixture) == []
     assert Path(fixture.env["ZEROLAB_NETWORK_STATE_DIR"]).exists()
+
+
+@pytest.mark.parametrize("kind", ["unknown", "missing", "symlink"])
+def test_saved_state_rejects_unknown_incomplete_or_unsafe_entries(tmp_path, kind):
+    fixture = alias_fixture(tmp_path)
+    write_saved_state(fixture)
+    state = Path(fixture.env["ZEROLAB_NETWORK_STATE_DIR"])
+    if kind == "unknown":
+        (state / "unexpected").write_text("value\n", encoding="utf-8")
+    elif kind == "missing":
+        (state / "wifi").unlink()
+    else:
+        target = tmp_path / "symlink-target"
+        target.write_text("enp-test\n", encoding="utf-8")
+        (state / "eth").unlink()
+        (state / "eth").symlink_to(target)
+
+    result = run_helper(fixture, "stop")
+
+    assert result.returncode != 0
+    assert "invalid saved state" in result.stderr
+    assert commands(fixture) == []
+    assert state.exists()
