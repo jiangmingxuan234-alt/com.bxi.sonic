@@ -446,6 +446,13 @@ def test_sender_preflight_rejects_non_regular_config_path(tmp_path):
     assert result.stderr == "invalid ZeroLab sender configuration\n"
 
 
+def test_sender_preflight_rejects_unreadable_regular_config_path():
+    result = run_sender_preflight(Path("/proc/kcore"))
+
+    assert result.returncode == 2
+    assert result.stderr == "invalid ZeroLab sender configuration\n"
+
+
 def test_manual_hardware_service_loads_optional_sender_configuration():
     text = (
         ROOT / "deploy/systemd/zerolab-hardware.service.d/10-network.conf"
