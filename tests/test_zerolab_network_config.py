@@ -13,9 +13,12 @@ ROOT = Path(__file__).resolve().parents[1]
 HELPER = ROOT / "deploy" / "zerolab-network-config"
 
 
-def test_packaged_default_is_direct():
-    text = (ROOT / "deploy/config/zerolab-network").read_text()
-    assert text.strip() == "ZEROLAB_NETWORK_MODE=direct"
+def test_packaged_defaults_are_direct_and_use_current_sender():
+    lines = (ROOT / "deploy/config/zerolab-network").read_text().splitlines()
+    assert lines == [
+        "ZEROLAB_NETWORK_MODE=direct",
+        "ZEROLAB_ALLOWED_SENDER=192.168.89.171",
+    ]
 
 
 def test_deployment_install_restarts_an_already_active_network_service():
@@ -83,6 +86,23 @@ def test_deployment_preserves_manual_hardware_startup():
     ).read_text(encoding="utf-8")
     assert "zerolab-hardware.service" not in network_unit
     assert "ros_elf_launch.service" not in network_unit
+
+    hardware_drop_in = (
+        ROOT / "deploy/systemd/zerolab-hardware.service.d/10-network.conf"
+    ).read_text(encoding="utf-8")
+    service_section = hardware_drop_in.split("[Service]", maxsplit=1)[1]
+    for forbidden_dependency in ["WantedBy", "RequiredBy", "PartOf", "BindsTo"]:
+        assert forbidden_dependency not in service_section
+
+
+def test_manual_hardware_service_loads_optional_sender_configuration():
+    text = (
+        ROOT / "deploy/systemd/zerolab-hardware.service.d/10-network.conf"
+    ).read_text()
+    assert "Wants=zerolab-network.service" in text
+    assert "After=zerolab-network.service" in text
+    assert "[Service]" in text
+    assert "EnvironmentFile=-/etc/default/zerolab-network" in text
 
 
 def test_deployment_guide_covers_modes_safety_and_rollback():

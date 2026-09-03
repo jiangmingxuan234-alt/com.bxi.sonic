@@ -133,6 +133,47 @@ systemctl is-active zerolab-network.service
 
 The helper is executable (0755); the configuration, unit, and hardware drop-in are data files (0644). The hardware service only wants and orders after the network service, so a network failure must not prevent PD or Normal from remaining available.
 
+## Sender allowlist
+
+The packaged configuration accepts UDP only from the current ZeroLab sender:
+
+~~~bash
+# Packaged/default sender
+ZEROLAB_ALLOWED_SENDER=192.168.89.171
+
+# Customer sender
+ZEROLAB_ALLOWED_SENDER=192.168.89.200
+
+# Explicitly accept any source IP
+ZEROLAB_ALLOWED_SENDER=
+~~~
+
+Choose and retain one explicit line in `/etc/default/zerolab-network`. This is
+a source-IP filter only: it does not authenticate source ports or sender
+identity. It applies equally in direct and alias modes.
+
+The hardware process reads this configuration when it starts and retains that
+start-time environment. After the existing PD Brake, mechanical-support, and
+controller-stop procedure, use the manual entry point to start it again:
+
+~~~bash
+sudo systemctl start zerolab-hardware.service
+~~~
+
+Restarting only `zerolab-network.service` does not apply a changed sender to a
+running hardware process.
+
+For foreground development, set the same value before launching the hardware
+stack:
+
+~~~bash
+export ZEROLAB_ALLOWED_SENDER=192.168.89.200
+ros2 launch bxi_example_py_elf3 example_demo_hw.launch.py
+~~~
+
+Use `Ctrl+C` to stop the foreground stack. A foreground hardware stack and
+the systemd hardware stack must not run together.
+
 ## Direct mode
 
 The installation already writes ZEROLAB_NETWORK_MODE=direct. Direct users do not need to change any network configuration. Prove its no-op network contract by recording the actual receiving interfaces before a restart:
@@ -211,8 +252,13 @@ Write the explicit alias configuration, then restart the supervisor:
 ~~~bash
 set -Eeuo pipefail
 
+sender_line_count=$(sudo grep -c '^ZEROLAB_ALLOWED_SENDER=' /etc/default/zerolab-network || true)
+test "$sender_line_count" -eq 1
+ZEROLAB_ALLOWED_SENDER=$(sudo sed -n 's/^ZEROLAB_ALLOWED_SENDER=//p' /etc/default/zerolab-network)
+
 sudo tee /etc/default/zerolab-network >/dev/null <<EOF
 ZEROLAB_NETWORK_MODE=alias
+ZEROLAB_ALLOWED_SENDER=$ZEROLAB_ALLOWED_SENDER
 ZEROLAB_ALIAS_IP=$ZEROLAB_ALIAS_IP
 ZEROLAB_ETH=$ZEROLAB_ETH
 ZEROLAB_WIFI=$ZEROLAB_WIFI
@@ -238,8 +284,13 @@ This mode switch cleans the service's saved alias state. It removes the alias on
 ~~~bash
 set -Eeuo pipefail
 
-sudo tee /etc/default/zerolab-network >/dev/null <<'EOF'
+sender_line_count=$(sudo grep -c '^ZEROLAB_ALLOWED_SENDER=' /etc/default/zerolab-network || true)
+test "$sender_line_count" -eq 1
+ZEROLAB_ALLOWED_SENDER=$(sudo sed -n 's/^ZEROLAB_ALLOWED_SENDER=//p' /etc/default/zerolab-network)
+
+sudo tee /etc/default/zerolab-network >/dev/null <<EOF
 ZEROLAB_NETWORK_MODE=direct
+ZEROLAB_ALLOWED_SENDER=$ZEROLAB_ALLOWED_SENDER
 EOF
 
 sudo systemctl restart zerolab-network.service
