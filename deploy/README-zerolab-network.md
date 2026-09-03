@@ -181,6 +181,17 @@ preserve that same sender line byte-for-byte. This is a source-IP filter only:
 it does not authenticate source ports or sender identity. It applies equally
 in direct and alias modes.
 
+For a systemd hardware launch, the sender assignment is validated from the raw
+configuration file before systemd's EnvironmentFile parsing. Write exactly one
+unquoted assignment with no whitespace around `=` and no leading or trailing
+whitespace. `ZEROLAB_ALLOWED_SENDER=any` is the only allow-all spelling.
+Padded or quoted `any`, an empty value, an invalid IPv4, and duplicate sender
+assignments make the manually requested hardware service fail its pre-start
+check; they never fall back to allow-all. Inspect the reason with
+`systemctl status zerolab-hardware.service` and
+`journalctl -u zerolab-hardware.service` after placing the robot in its safe,
+mechanically supported state.
+
 The hardware process reads this configuration when it starts and retains that
 start-time environment. After the existing PD Brake, mechanical-support, and
 controller-stop procedure, use the manual entry point to start it again:

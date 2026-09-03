@@ -18,6 +18,7 @@ INSPECTED_ORDINARY_IPV4_PRESENT=0
 
 usage() {
     printf 'usage: %s {start|stop|run}\n' "$0" >&2
+    printf '       %s validate-sender CONFIG_FILE\n' "$0" >&2
 }
 
 validate_mode() {
@@ -106,6 +107,70 @@ valid_ipv4() {
                 ;;
         esac
     done
+}
+
+valid_sender_ipv4() {
+    local value=$1
+    local octet
+    local -a octets
+
+    [[ "$value" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+    IFS=. read -r -a octets <<< "$value"
+    [[ ${#octets[@]} -eq 4 ]] || return 1
+    for octet in "${octets[@]}"; do
+        [[ "$octet" = 0 || "$octet" =~ ^[1-9][0-9]{0,2}$ ]] || return 1
+        (( 10#$octet <= 255 )) || return 1
+    done
+}
+
+invalid_sender_config() {
+    printf 'invalid ZeroLab sender configuration\n' >&2
+    return 2
+}
+
+validate_sender_config() {
+    local config_file=$1
+    local line
+    local value
+    local sender_count=0
+
+    if [[ ! -e "$config_file" && ! -L "$config_file" ]]; then
+        return 0
+    fi
+    if [[ ! -f "$config_file" || -L "$config_file" ]]; then
+        invalid_sender_config
+        return $?
+    fi
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$line" =~ ^[[:space:]]*# ]]; then
+            continue
+        fi
+        if [[ "$line" =~ ^[[:space:]]*ZEROLAB_ALLOWED_SENDER($|[[:space:]=]) ]]; then
+            ((sender_count += 1))
+            if [[ $sender_count -ne 1 ]]; then
+                invalid_sender_config
+                return $?
+            fi
+            case "$line" in
+                ZEROLAB_ALLOWED_SENDER=any)
+                    ;;
+                ZEROLAB_ALLOWED_SENDER=*)
+                    value=${line#ZEROLAB_ALLOWED_SENDER=}
+                    if ! valid_sender_ipv4 "$value"; then
+                        invalid_sender_config
+                        return $?
+                    fi
+                    ;;
+                *)
+                    invalid_sender_config
+                    return $?
+                    ;;
+            esac
+        fi
+    done < "$config_file" || {
+        invalid_sender_config
+        return $?
+    }
 }
 
 valid_interface() {
@@ -776,6 +841,15 @@ run_network() {
         fi
     done
 }
+
+if [[ "$ACTION" = validate-sender ]]; then
+    if [[ $# -ne 2 ]]; then
+        usage
+        exit 2
+    fi
+    validate_sender_config "$2"
+    exit $?
+fi
 
 case "$ACTION" in
     start|stop|run)

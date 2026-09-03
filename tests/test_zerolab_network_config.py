@@ -348,6 +348,104 @@ def test_deployment_preserves_manual_hardware_startup():
         assert forbidden_dependency not in service_section
 
 
+def run_sender_preflight(config: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [str(HELPER), "validate-sender", str(config)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+@pytest.mark.parametrize(
+    "sender_line",
+    [
+        "ZEROLAB_ALLOWED_SENDER=192.168.89.171\n",
+        "ZEROLAB_ALLOWED_SENDER=0.0.0.0\n",
+        "ZEROLAB_ALLOWED_SENDER=255.255.255.255\n",
+        "ZEROLAB_ALLOWED_SENDER=any\n",
+    ],
+)
+def test_sender_preflight_accepts_exact_assignments(tmp_path, sender_line):
+    config = tmp_path / "zerolab-network"
+    config.write_text(
+        "ZEROLAB_NETWORK_MODE=direct\n" + sender_line,
+        encoding="utf-8",
+    )
+
+    result = run_sender_preflight(config)
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_sender_preflight_allows_missing_file_and_absent_assignment(tmp_path):
+    missing = tmp_path / "missing"
+    config = tmp_path / "zerolab-network"
+    config.write_text("ZEROLAB_NETWORK_MODE=direct\n", encoding="utf-8")
+
+    assert run_sender_preflight(missing).returncode == 0
+    assert run_sender_preflight(config).returncode == 0
+
+
+@pytest.mark.parametrize(
+    "sender_line",
+    [
+        "ZEROLAB_ALLOWED_SENDER=\n",
+        "ZEROLAB_ALLOWED_SENDER= \n",
+        "ZEROLAB_ALLOWED_SENDER= any\n",
+        "ZEROLAB_ALLOWED_SENDER=any \n",
+        " ZEROLAB_ALLOWED_SENDER=any\n",
+        "ZEROLAB_ALLOWED_SENDER =any\n",
+        "ZEROLAB_ALLOWED_SENDER='any'\n",
+        'ZEROLAB_ALLOWED_SENDER="any"\n',
+        "ZEROLAB_ALLOWED_SENDER=ANY\n",
+        "ZEROLAB_ALLOWED_SENDER=customer-pc\n",
+        "ZEROLAB_ALLOWED_SENDER=2001:db8::1\n",
+        "ZEROLAB_ALLOWED_SENDER=999.1.1.1\n",
+        "ZEROLAB_ALLOWED_SENDER=01.2.3.4\n",
+        "ZEROLAB_ALLOWED_SENDER=192.168.89.200 \n",
+    ],
+)
+def test_sender_preflight_rejects_non_exact_assignment(tmp_path, sender_line):
+    config = tmp_path / "zerolab-network"
+    config.write_text(sender_line, encoding="utf-8")
+
+    result = run_sender_preflight(config)
+
+    assert result.returncode == 2
+    assert result.stderr == "invalid ZeroLab sender configuration\n"
+
+
+def test_sender_preflight_rejects_duplicate_assignments(tmp_path):
+    config = tmp_path / "zerolab-network"
+    config.write_text(
+        "ZEROLAB_ALLOWED_SENDER=192.168.89.171\n"
+        "ZEROLAB_ALLOWED_SENDER=any\n",
+        encoding="utf-8",
+    )
+
+    result = run_sender_preflight(config)
+
+    assert result.returncode == 2
+    assert result.stderr == "invalid ZeroLab sender configuration\n"
+
+
+def test_sender_preflight_rejects_non_regular_config_path(tmp_path):
+    target = tmp_path / "target"
+    target.write_text(
+        "ZEROLAB_ALLOWED_SENDER=192.168.89.171\n",
+        encoding="utf-8",
+    )
+    symlink = tmp_path / "zerolab-network"
+    symlink.symlink_to(target)
+
+    result = run_sender_preflight(symlink)
+
+    assert result.returncode == 2
+    assert result.stderr == "invalid ZeroLab sender configuration\n"
+
+
 def test_manual_hardware_service_loads_optional_sender_configuration():
     text = (
         ROOT / "deploy/systemd/zerolab-hardware.service.d/10-network.conf"
@@ -356,6 +454,10 @@ def test_manual_hardware_service_loads_optional_sender_configuration():
     assert "After=zerolab-network.service" in text
     assert "[Service]" in text
     assert "EnvironmentFile=-/etc/default/zerolab-network" in text
+    assert (
+        "ExecStartPre=/usr/local/libexec/zerolab-network-config "
+        "validate-sender /etc/default/zerolab-network"
+    ) in text
 
 
 def test_deployment_guide_covers_modes_safety_and_rollback():
@@ -514,7 +616,13 @@ def test_hardware_drop_in_keeps_network_non_blocking():
     assert "Wants=zerolab-network.service" in text
     assert "After=zerolab-network.service" in text
     assert "Requires=zerolab-network.service" not in text
-    assert "ExecStart" not in text
+    assert not any(
+        line.startswith("ExecStart=") for line in text.splitlines()
+    )
+    assert (
+        "ExecStartPre=/usr/local/libexec/zerolab-network-config "
+        "validate-sender /etc/default/zerolab-network"
+    ) in text
 
 
 def test_network_unit_verifies_with_staged_helper(tmp_path):
