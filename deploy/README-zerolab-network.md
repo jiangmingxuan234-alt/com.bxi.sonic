@@ -115,12 +115,33 @@ backup_one /usr/local/libexec/zerolab-network-config zerolab-network-config
 backup_one /etc/systemd/system/zerolab-network.service zerolab-network.service
 backup_one /etc/systemd/system/zerolab-hardware.service.d/10-network.conf zerolab-hardware-10-network.conf
 
+preserved_sender_line=
+if sudo test -e /etc/default/zerolab-network; then
+    sender_line_count=$(sudo grep -c '^ZEROLAB_ALLOWED_SENDER=' /etc/default/zerolab-network || true)
+    case "$sender_line_count" in
+        0)
+            ;;
+        1)
+            preserved_sender_line=$(sudo sed -n '/^ZEROLAB_ALLOWED_SENDER=/p' /etc/default/zerolab-network)
+            ;;
+        *)
+            printf 'expected at most one ZEROLAB_ALLOWED_SENDER line, found %s\n' \
+                "$sender_line_count" >&2
+            exit 1
+            ;;
+    esac
+fi
+
 if systemctl cat zerolab-network.service >/dev/null 2>&1; then
     sudo systemctl stop zerolab-network.service
 fi
 
 sudo install -Dm 0755 "$REPO_ROOT/deploy/zerolab-network-config" /usr/local/libexec/zerolab-network-config
 sudo install -Dm 0644 "$REPO_ROOT/deploy/config/zerolab-network" /etc/default/zerolab-network
+if [ -n "$preserved_sender_line" ]; then
+    sudo sed -i '/^ZEROLAB_ALLOWED_SENDER=/d' /etc/default/zerolab-network
+    printf '%s\n' "$preserved_sender_line" | sudo tee -a /etc/default/zerolab-network >/dev/null
+fi
 sudo install -Dm 0644 "$REPO_ROOT/deploy/systemd/zerolab-network.service" /etc/systemd/system/zerolab-network.service
 sudo install -Dm 0644 "$REPO_ROOT/deploy/systemd/zerolab-hardware.service.d/10-network.conf" /etc/systemd/system/zerolab-hardware.service.d/10-network.conf
 
@@ -148,9 +169,12 @@ ZEROLAB_ALLOWED_SENDER=192.168.89.200
 ZEROLAB_ALLOWED_SENDER=
 ~~~
 
-Choose and retain one explicit line in `/etc/default/zerolab-network`. This is
-a source-IP filter only: it does not authenticate source ports or sender
-identity. It applies equally in direct and alias modes.
+Choose and retain one explicit line in `/etc/default/zerolab-network`. A
+repeat installation preserves one existing explicit sender line, including an
+intentional empty value; it keeps the packaged default when no sender line
+exists and stops before installation if multiple sender lines are present.
+This is a source-IP filter only: it does not authenticate source ports or
+sender identity. It applies equally in direct and alias modes.
 
 The hardware process reads this configuration when it starts and retains that
 start-time environment. After the existing PD Brake, mechanical-support, and

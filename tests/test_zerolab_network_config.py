@@ -51,6 +51,148 @@ def test_deployment_install_restarts_an_already_active_network_service():
     assert install_block.index(restart) < install_block.rindex(active)
 
 
+@pytest.mark.parametrize(
+    "existing_sender_line",
+    [
+        "ZEROLAB_ALLOWED_SENDER=192.168.89.200\n",
+        "ZEROLAB_ALLOWED_SENDER=\n",
+    ],
+)
+def test_deployment_install_preserves_an_explicit_existing_sender(
+    tmp_path, existing_sender_line
+):
+    text = (ROOT / "deploy/README-zerolab-network.md").read_text(
+        encoding="utf-8"
+    )
+    install_block = text.split(
+        "## Back up and install", maxsplit=1
+    )[1].split("~~~bash", maxsplit=1)[1].split("~~~", maxsplit=1)[0]
+
+    repo_root = tmp_path / "repo"
+    config = repo_root / "deploy/config/zerolab-network"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        "ZEROLAB_NETWORK_MODE=direct\n"
+        "ZEROLAB_ALLOWED_SENDER=192.168.89.171\n",
+        encoding="utf-8",
+    )
+    for relative_path in [
+        "deploy/zerolab-network-config",
+        "deploy/systemd/zerolab-network.service",
+        "deploy/systemd/zerolab-hardware.service.d/10-network.conf",
+    ]:
+        path = repo_root / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("fixture\n", encoding="utf-8")
+
+    install_root = tmp_path / "installed"
+    existing_config = install_root / "etc/default/zerolab-network"
+    existing_config.parent.mkdir(parents=True)
+    existing_config.write_text(
+        "ZEROLAB_NETWORK_MODE=alias\n" + existing_sender_line,
+        encoding="utf-8",
+    )
+    backup_dir = tmp_path / "backup"
+
+    fake_sudo = tmp_path / "sudo"
+    fake_sudo.write_text(
+        "#!/bin/sh\n"
+        "set -eu\n"
+        "case \"$1\" in\n"
+        "  test)\n"
+        "    case \"${3:-}\" in\n"
+        "      /etc/default/zerolab-network) set -- \"$1\" \"$2\" \"$INSTALL_ROOT$3\" ;;\n"
+        "    esac\n"
+        "    ;;\n"
+        "  cp)\n"
+        "    case \"${4:-}\" in\n"
+        "      /etc/default/zerolab-network) set -- \"$1\" \"$2\" \"$3\" \"$INSTALL_ROOT$4\" \"$5\" ;;\n"
+        "    esac\n"
+        "    ;;\n"
+        "  grep)\n"
+        "    case \"${4:-}\" in\n"
+        "      /etc/default/zerolab-network) set -- \"$1\" \"$2\" \"$3\" \"$INSTALL_ROOT$4\" ;;\n"
+        "    esac\n"
+        "    ;;\n"
+        "  sed)\n"
+        "    case \"${3:-}\" in\n"
+        "      /etc/default/zerolab-network) set -- \"$1\" \"$2\" \"$INSTALL_ROOT$3\" ;;\n"
+        "    esac\n"
+        "    case \"${4:-}\" in\n"
+        "      /etc/default/zerolab-network) set -- \"$1\" \"$2\" \"$3\" \"$INSTALL_ROOT$4\" ;;\n"
+        "    esac\n"
+        "    ;;\n"
+        "  tee)\n"
+        "    case \"${3:-}\" in\n"
+        "      /etc/default/zerolab-network) set -- \"$1\" \"$2\" \"$INSTALL_ROOT$3\" ;;\n"
+        "    esac\n"
+        "    ;;\n"
+        "esac\n"
+        "exec \"$@\"\n",
+        encoding="utf-8",
+    )
+    fake_sudo.chmod(0o755)
+    fake_chown = tmp_path / "chown"
+    fake_chown.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake_chown.chmod(0o755)
+    fake_install = tmp_path / "install"
+    fake_install.write_text(
+        "#!/bin/sh\n"
+        "set -eu\n"
+        "if test \"$1\" != -Dm; then\n"
+        "  exec /usr/bin/install \"$@\"\n"
+        "fi\n"
+        "mode=$2\n"
+        "source_file=$3\n"
+        "target_file=$4\n"
+        "case \"$target_file\" in\n"
+        "  /etc/default/zerolab-network) target_file=\"$INSTALL_ROOT/etc/default/zerolab-network\" ;;\n"
+        "  /usr/local/libexec/zerolab-network-config) target_file=\"$INSTALL_ROOT/usr/local/libexec/zerolab-network-config\" ;;\n"
+        "  /etc/systemd/system/zerolab-network.service) target_file=\"$INSTALL_ROOT/etc/systemd/system/zerolab-network.service\" ;;\n"
+        "  /etc/systemd/system/zerolab-hardware.service.d/10-network.conf) target_file=\"$INSTALL_ROOT/etc/systemd/system/zerolab-hardware.service.d/10-network.conf\" ;;\n"
+        "esac\n"
+        "/usr/bin/install -Dm \"$mode\" \"$source_file\" \"$target_file\"\n",
+        encoding="utf-8",
+    )
+    fake_install.chmod(0o755)
+    fake_systemctl = tmp_path / "systemctl"
+    fake_systemctl.write_text(
+        "#!/bin/sh\n"
+        "case \"$1\" in\n"
+        "  cat) exit 1 ;;\n"
+        "  is-enabled) printf '%s\\n' enabled ;;\n"
+        "  is-active) printf '%s\\n' active ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    fake_systemctl.chmod(0o755)
+    fake_systemd_analyze = tmp_path / "systemd-analyze"
+    fake_systemd_analyze.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake_systemd_analyze.chmod(0o755)
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "REPO_ROOT": str(repo_root),
+            "BACKUP_DIR": str(backup_dir),
+            "INSTALL_ROOT": str(install_root),
+            "PATH": f"{tmp_path}:{env['PATH']}",
+        }
+    )
+    result = subprocess.run(
+        ["bash", "-c", install_block],
+        text=True,
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert existing_config.read_text(encoding="utf-8") == (
+        "ZEROLAB_NETWORK_MODE=direct\n" + existing_sender_line
+    )
+
+
 def test_deployment_preserves_manual_hardware_startup():
     text = (ROOT / "deploy/README-zerolab-network.md").read_text(
         encoding="utf-8"
