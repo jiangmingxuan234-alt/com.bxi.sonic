@@ -117,7 +117,15 @@ backup_one /etc/systemd/system/zerolab-hardware.service.d/10-network.conf zerola
 
 preserved_sender_line=
 if sudo test -e /etc/default/zerolab-network; then
-    sender_line_count=$(sudo grep -c '^ZEROLAB_ALLOWED_SENDER=' /etc/default/zerolab-network || true)
+    if sender_line_count=$(sudo grep -c '^ZEROLAB_ALLOWED_SENDER=' /etc/default/zerolab-network); then
+        :
+    else
+        sender_count_status=$?
+        if test "$sender_count_status" -ne 1; then
+            printf 'failed to read ZEROLAB_ALLOWED_SENDER from /etc/default/zerolab-network\n' >&2
+            exit 1
+        fi
+    fi
     case "$sender_line_count" in
         0)
             ;;
@@ -181,13 +189,15 @@ preserve that same sender line byte-for-byte. This is a source-IP filter only:
 it does not authenticate source ports or sender identity. It applies equally
 in direct and alias modes.
 
-For a systemd hardware launch, the sender assignment is validated from the raw
-configuration file before systemd's EnvironmentFile parsing. Write exactly one
+For a systemd hardware launch, raw validation runs in `ExecStartPre` after
+systemd has built the preflight environment from `EnvironmentFile`, but before
+the normalized value reaches the main hardware `ExecStart`. Write exactly one
 unquoted assignment with no whitespace around `=` and no leading or trailing
-whitespace. `ZEROLAB_ALLOWED_SENDER=any` is the only allow-all spelling.
-Padded or quoted `any`, an empty value, an invalid IPv4, and duplicate sender
-assignments make the manually requested hardware service fail its pre-start
-check; they never fall back to allow-all. Inspect the reason with
+whitespace. Line continuations are invalid, and
+`ZEROLAB_ALLOWED_SENDER=any` is the only allow-all spelling. Padded or quoted
+`any`, an empty value, an invalid IPv4, and duplicate sender assignments make
+the manually requested hardware service fail its pre-start check; they never
+fall back to allow-all. Inspect the reason with
 `systemctl status zerolab-hardware.service` and
 `journalctl -u zerolab-hardware.service` after placing the robot in its safe,
 mechanically supported state.
@@ -292,7 +302,15 @@ Write the explicit alias configuration, then restart the supervisor:
 ~~~bash
 set -Eeuo pipefail
 
-sender_line_count=$(sudo grep -c '^ZEROLAB_ALLOWED_SENDER=' /etc/default/zerolab-network || true)
+if sender_line_count=$(sudo grep -c '^ZEROLAB_ALLOWED_SENDER=' /etc/default/zerolab-network); then
+    :
+else
+    sender_count_status=$?
+    if test "$sender_count_status" -ne 1; then
+        printf 'failed to read ZEROLAB_ALLOWED_SENDER from /etc/default/zerolab-network\n' >&2
+        exit 1
+    fi
+fi
 test "$sender_line_count" -eq 1
 ZEROLAB_ALLOWED_SENDER=$(sudo sed -n 's/^ZEROLAB_ALLOWED_SENDER=//p' /etc/default/zerolab-network)
 
@@ -324,7 +342,15 @@ This mode switch cleans the service's saved alias state. It removes the alias on
 ~~~bash
 set -Eeuo pipefail
 
-sender_line_count=$(sudo grep -c '^ZEROLAB_ALLOWED_SENDER=' /etc/default/zerolab-network || true)
+if sender_line_count=$(sudo grep -c '^ZEROLAB_ALLOWED_SENDER=' /etc/default/zerolab-network); then
+    :
+else
+    sender_count_status=$?
+    if test "$sender_count_status" -ne 1; then
+        printf 'failed to read ZEROLAB_ALLOWED_SENDER from /etc/default/zerolab-network\n' >&2
+        exit 1
+    fi
+fi
 test "$sender_line_count" -eq 1
 ZEROLAB_ALLOWED_SENDER=$(sudo sed -n 's/^ZEROLAB_ALLOWED_SENDER=//p' /etc/default/zerolab-network)
 

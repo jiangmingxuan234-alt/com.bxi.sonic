@@ -194,6 +194,49 @@ def test_deployment_install_preserves_an_explicit_existing_sender(
 
 
 @pytest.mark.parametrize(
+    ("grep_status", "expected_success"),
+    [(1, True), (2, False)],
+)
+def test_deployment_install_checks_sender_count_read_status(
+    tmp_path, grep_status, expected_success
+):
+    text = (ROOT / "deploy/README-zerolab-network.md").read_text(
+        encoding="utf-8"
+    )
+    install_block = text.split(
+        "## Back up and install", maxsplit=1
+    )[1].split("~~~bash", maxsplit=1)[1].split("~~~", maxsplit=1)[0]
+    sender_read_block = "preserved_sender_line=" + install_block.split(
+        "preserved_sender_line=", maxsplit=1
+    )[1].split("if systemctl cat", maxsplit=1)[0]
+
+    fake_sudo = tmp_path / "sudo"
+    fake_sudo.write_text(
+        "#!/bin/sh\n"
+        "case \"$1\" in\n"
+        "  test) exit 0 ;;\n"
+        "  grep) printf '0\\n'; exit \"$FAKE_GREP_STATUS\" ;;\n"
+        "  *) exit 99 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    fake_sudo.chmod(0o755)
+    env = os.environ.copy()
+    env["PATH"] = f"{tmp_path}:{env['PATH']}"
+    env["FAKE_GREP_STATUS"] = str(grep_status)
+
+    result = subprocess.run(
+        ["bash", "-c", sender_read_block],
+        text=True,
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+
+    assert (result.returncode == 0) is expected_success
+
+
+@pytest.mark.parametrize(
     "sender_line",
     [
         "ZEROLAB_ALLOWED_SENDER=192.168.89.200\n",
@@ -304,6 +347,49 @@ def test_deployment_mode_rewrites_preserve_explicit_sender(
     )
 
 
+@pytest.mark.parametrize(
+    "section_marker",
+    [
+        "Write the explicit alias configuration, then restart the supervisor:",
+        "## Switch back to direct",
+    ],
+)
+def test_deployment_mode_rewrite_aborts_when_sender_count_read_fails(
+    tmp_path, section_marker
+):
+    text = (ROOT / "deploy/README-zerolab-network.md").read_text(
+        encoding="utf-8"
+    )
+    block = text.split(section_marker, maxsplit=1)[1].split(
+        "~~~bash", maxsplit=1
+    )[1].split("~~~", maxsplit=1)[0]
+    sender_read_block = block.split("sudo tee", maxsplit=1)[0]
+
+    fake_sudo = tmp_path / "sudo"
+    fake_sudo.write_text(
+        "#!/bin/sh\n"
+        "case \"$1\" in\n"
+        "  grep) printf '1\\n'; exit 2 ;;\n"
+        "  sed) printf '192.168.89.200\\n'; exit 0 ;;\n"
+        "  *) exit 99 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    fake_sudo.chmod(0o755)
+    env = os.environ.copy()
+    env["PATH"] = f"{tmp_path}:{env['PATH']}"
+
+    result = subprocess.run(
+        ["bash", "-c", sender_read_block],
+        text=True,
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+
+    assert result.returncode != 0
+
+
 def test_deployment_preserves_manual_hardware_startup():
     text = (ROOT / "deploy/README-zerolab-network.md").read_text(
         encoding="utf-8"
@@ -377,6 +463,25 @@ def test_sender_preflight_accepts_exact_assignments(tmp_path, sender_line):
     result = run_sender_preflight(config)
 
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    "config_contents",
+    [
+        "ZEROLAB_ALLOWED_\\\nSENDER= any\n",
+        "ZEROLAB_ALLOWED_SENDER\\\n= any\n",
+    ],
+)
+def test_sender_preflight_rejects_line_continuation_bypass(
+    tmp_path, config_contents
+):
+    config = tmp_path / "zerolab-network"
+    config.write_text(config_contents, encoding="utf-8")
+
+    result = run_sender_preflight(config)
+
+    assert result.returncode == 2
+    assert result.stderr == "invalid ZeroLab sender configuration\n"
 
 
 def test_sender_preflight_allows_missing_file_and_absent_assignment(tmp_path):

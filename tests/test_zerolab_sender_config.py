@@ -1,3 +1,6 @@
+import sys
+import types
+
 import pytest
 
 from zerolab.sender_config import resolve_allowed_sender
@@ -52,3 +55,31 @@ def test_invalid_manifest_sender_is_rejected_when_override_is_absent():
 def test_non_string_manifest_sender_is_rejected():
     with pytest.raises(ValueError, match="allowed sender"):
         resolve_allowed_sender(171, {})
+
+
+def test_omitted_source_sender_uses_secure_default(monkeypatch):
+    rclpy = types.ModuleType("rclpy")
+    rclpy_node = types.ModuleType("rclpy.node")
+    rclpy_node.Node = type("Node", (), {})
+    rclpy.node = rclpy_node
+    mod_api = types.ModuleType("bxi_example_py_elf3.framework.mod_api")
+    mod_api.NodeBuildContext = type("NodeBuildContext", (), {})
+
+    for name, module in {
+        "rclpy": rclpy,
+        "rclpy.node": rclpy_node,
+        "bxi_example_py_elf3": types.ModuleType("bxi_example_py_elf3"),
+        "bxi_example_py_elf3.framework": types.ModuleType(
+            "bxi_example_py_elf3.framework"
+        ),
+        "bxi_example_py_elf3.framework.mod_api": mod_api,
+    }.items():
+        monkeypatch.setitem(sys.modules, name, module)
+
+    from zerolab.source_node import validate_source_params
+
+    params = validate_source_params({})
+
+    assert resolve_allowed_sender(params["allowed_sender"], {}) == (
+        "192.168.89.171"
+    )

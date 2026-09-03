@@ -40,7 +40,7 @@ else:
 SOURCE_DEFAULTS: dict[str, object] = {
     "udp_bind_host": "0.0.0.0",
     "udp_port": 18000,
-    "allowed_sender": "",
+    "allowed_sender": "192.168.89.171",
     "pose_host": "127.0.0.1",
     "pose_port": 5558,
     "pose_topic": "pose",

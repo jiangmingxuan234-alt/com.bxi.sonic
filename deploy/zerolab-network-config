@@ -147,6 +147,12 @@ validate_sender_config() {
         return $?
     fi
     while IFS= read -r line || [[ -n "$line" ]]; do
+        case "$line" in
+            *\\)
+                invalid_sender_config
+                return $?
+                ;;
+        esac
         if [[ "$line" =~ ^[[:space:]]*# ]]; then
             continue
         fi
