@@ -388,6 +388,27 @@ def test_sender_preflight_allows_missing_file_and_absent_assignment(tmp_path):
     assert run_sender_preflight(config).returncode == 0
 
 
+def test_sender_preflight_accepts_valid_config_with_unavailable_path(tmp_path):
+    config = tmp_path / "zerolab-network"
+    config.write_text(
+        "ZEROLAB_ALLOWED_SENDER=192.168.89.171",
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["PATH"] = str(tmp_path / "unavailable-path")
+
+    result = subprocess.run(
+        [str(HELPER), "validate-sender", str(config)],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 @pytest.mark.parametrize(
     "sender_line",
     [
