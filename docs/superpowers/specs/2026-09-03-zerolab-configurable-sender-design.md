@@ -4,8 +4,8 @@
 
 Allow each customer to select the IPv4 address permitted to send ZeroLab UDP
 frames without rebuilding or editing the installed Mod. Preserve
-`192.168.89.171` as the packaged default, retain an explicit way to disable the
-source-address filter, and leave the existing PICO path unchanged.
+`192.168.89.171` as the packaged default, retain a fail-closed explicit way to
+disable the source-address filter, and leave the existing PICO path unchanged.
 
 ## Configuration contract
 
@@ -23,14 +23,16 @@ The effective sender is resolved when the ZeroLab source node is constructed:
 2. If the variable is absent, the existing `mod.yaml` `allowed_sender` value is
    used. This preserves the current `192.168.89.171` behavior for deployments
    that have not installed the new configuration.
-3. An explicitly empty value disables source-IP filtering and accepts UDP
-   datagrams from any sender, subject to the existing packet-size and protocol
-   checks.
+3. The exact lowercase keyword `any` disables source-IP filtering and accepts
+   UDP datagrams from any sender, subject to the existing packet-size and
+   protocol checks.
 
-A non-empty value must be an exact IPv4 address. IPv6 addresses, hostnames,
-malformed addresses, and values with surrounding whitespace are rejected before
-the UDP receiver is created. Invalid configuration must never silently weaken
-the allowlist.
+Every other value must be an exact IPv4 address. Empty values, IPv6 addresses,
+hostnames, malformed addresses, and values with surrounding whitespace are
+rejected before the UDP receiver is created. Invalid configuration must never
+silently weaken the allowlist. The explicit keyword avoids systemd
+`EnvironmentFile` normalizing an accidental whitespace-only value into the
+previous empty allow-all sentinel.
 
 The setting filters only the UDP source address. It does not authenticate the
 sender, restrict its source port, or change the destination port `18000`.
@@ -88,14 +90,14 @@ ZEROLAB_NETWORK_MODE=direct
 ZEROLAB_ALLOWED_SENDER=192.168.89.200
 ```
 
-An empty assignment is the deliberate opt-out:
+The exact lowercase keyword is the deliberate opt-out:
 
 ```bash
-ZEROLAB_ALLOWED_SENDER=
+ZEROLAB_ALLOWED_SENDER=any
 ```
 
 Deployment documentation will explain the default, custom IPv4, empty-value
-behavior, validation failures, process restart requirement, direct/alias
+rejection, `any` behavior, validation failures, process restart requirement, direct/alias
 independence, and the foreground environment override. Robot commands remain
 guarded by the existing controller-stop, mechanical-support, and physical
 emergency-stop procedures.
@@ -103,10 +105,10 @@ emergency-stop procedures.
 ## Error handling
 
 - A valid IPv4 address is canonicalized before comparison.
-- An empty override maps to no source-address filter.
+- The exact lowercase `any` override maps to no source-address filter.
 - An absent override preserves the manifest value.
-- An invalid non-empty override raises a clear configuration error before the
-  UDP socket is opened.
+- An empty or otherwise invalid override raises a clear configuration error
+  before the UDP socket is opened.
 - No error path falls back from an invalid value to accepting arbitrary
   senders.
 - No configuration path starts, stops, enables, or disables a hardware
@@ -118,8 +120,9 @@ Automated tests will prove:
 
 1. An absent environment variable uses the manifest sender.
 2. A custom IPv4 environment value overrides the manifest sender.
-3. An explicitly empty environment value disables the filter.
-4. Invalid, IPv6, and hostname values are rejected without opening the
+3. The exact lowercase `any` environment value disables the filter.
+4. Empty, invalid, IPv6, hostname, and whitespace-padded values are rejected
+   without opening the
    receiver.
 5. The UDP receiver continues accepting the configured sender and counting a
    different sender as unexpected.
@@ -133,7 +136,7 @@ Automated tests will prove:
 
 Local verification must not start robot hardware. Separate guarded robot
 acceptance will verify a custom sender, rejection of a different sender, the
-empty opt-out if required, and the complete PICO TCP/body-tracking/calibration/
+explicit `any` opt-out if required, and the complete PICO TCP/body-tracking/calibration/
 live-pose/head/wrist/gripper/re-entry path.
 
 ## Acceptance criteria

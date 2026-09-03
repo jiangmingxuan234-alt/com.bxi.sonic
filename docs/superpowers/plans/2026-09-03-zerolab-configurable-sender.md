@@ -11,13 +11,22 @@
 ## Global Constraints
 
 - Keep `192.168.89.171` as the packaged and manifest default.
-- An explicit empty `ZEROLAB_ALLOWED_SENDER=` disables source-IP filtering.
-- Reject IPv6, hostnames, malformed values, and surrounding whitespace; never fall back from invalid input to allow-all.
+- Only the exact lowercase keyword `ZEROLAB_ALLOWED_SENDER=any` disables source-IP filtering.
+- Reject empty values, IPv6, hostnames, malformed values, and surrounding whitespace; never fall back from invalid input to allow-all.
 - Do not change UDP destination port `18000` or add source-port authentication.
 - Do not modify `pico_manager`, `smpl_bridge`, `sonic_teleop`, existing PICO events, routes, actions, or ports.
 - Do not start, stop, enable, or disable robot controller services during local implementation or verification.
 - Preserve manual hardware startup: `zerolab-hardware.service` remains disabled until explicitly started by an operator.
 - Preserve all existing untracked build, install, and log directories in the worktree.
+
+## Approved Safety Amendment
+
+Task 4 exposed that systemd `EnvironmentFile` strips unquoted whitespace, so
+the initial empty allow-all sentinel could turn an accidental whitespace-only
+value into allow-all. The user approved replacing that sentinel with the exact
+lowercase keyword `any`. Tasks 1-3 below record the initial TDD sequence; Task 5
+supersedes their empty-value behavior, after which every Task 4 verification
+step must be rerun.
 
 ## File Structure
 
@@ -586,3 +595,121 @@ sender capture, wrong-sender rejection, strict alias UDP, reboot/manual-start,
 and complete PICO headset/body-tracking/calibration/live-pose/head/wrist/
 gripper/re-entry checks marked `NOT RUN` until their separate guarded robot
 acceptance produces evidence.
+
+---
+
+### Task 5: Replace the unsafe empty opt-out with an explicit `any` sentinel
+
+**Files:**
+- Modify: `tests/test_zerolab_sender_config.py`
+- Modify: `zerolab/sender_config.py`
+- Modify: `tests/test_zerolab_network_config.py`
+- Modify: `deploy/README-zerolab-network.md`
+
+**Interfaces:**
+- Consumes: `resolve_allowed_sender(manifest_sender: object, environ: Mapping[str, str]) -> str | None` and the deployed `ZEROLAB_ALLOWED_SENDER` environment variable.
+- Produces: `None` only for the exact lowercase value `any`; empty and whitespace-only values raise `ValueError` before ROS or UDP construction.
+
+- [ ] **Step 1: Write the failing sentinel and fail-closed tests**
+
+Replace the empty opt-out test with:
+
+```python
+def test_explicit_any_environment_sender_disables_filter():
+    assert resolve_allowed_sender(
+        "192.168.89.171",
+        {"ZEROLAB_ALLOWED_SENDER": "any"},
+    ) is None
+```
+
+Add `""`, `" "`, `"ANY"`, `" any"`, and `"any "` to the invalid environment
+parameterization. These cases name the production break: returning `None` for
+anything other than exact lowercase `any` would unintentionally weaken the
+allowlist.
+
+Update the deployment execution tests so reinstall and direct/alias rewrites
+preserve both a custom IPv4 and the literal `ZEROLAB_ALLOWED_SENDER=any`; remove
+the old expectation that an empty assignment is valid.
+
+- [ ] **Step 2: Run both focused suites and verify RED**
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+python3 -m pytest -q -p no:cacheprovider \
+  tests/test_zerolab_sender_config.py \
+  tests/test_zerolab_network_config.py
+```
+
+Expected: sender tests fail because `any` is rejected and empty returns `None`;
+deployment behavior tests fail where the documentation still writes or expects
+an empty opt-out.
+
+- [ ] **Step 3: Implement the exact sentinel**
+
+In `zerolab/sender_config.py`, replace the empty branch with:
+
+```python
+if candidate == "any":
+    return None
+```
+
+Leave all other candidates on the exact-whitespace and `IPv4Address` validation
+path. Change both error messages to:
+
+```text
+allowed sender must be an IPv4 address or 'any'
+```
+
+Do not accept case variants, empty strings, whitespace-only strings, hostnames,
+or IPv6.
+
+- [ ] **Step 4: Update operator documentation and preservation behavior**
+
+Replace every statement and command that treats an empty sender as allow-all
+with the exact lowercase keyword:
+
+```bash
+ZEROLAB_ALLOWED_SENDER=any
+```
+
+State explicitly that empty and whitespace-only values are invalid and fail
+closed. Preserve `any` byte-for-byte during reinstall and direct/alias mode
+rewrites in the same way as a customer IPv4.
+
+- [ ] **Step 5: Run focused unit, real integration, and deployment validation**
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+python3 -m pytest -q -p no:cacheprovider \
+  tests/test_zerolab_sender_config.py \
+  tests/test_zerolab_network_config.py
+PYTHONPATH="$PWD:/home/fazepurple/ros2_ws/bxi_rl_controller_ros2_example_dev/src/bxi_example_py_elf3" \
+PYTHONDONTWRITEBYTECODE=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+python3 -m pytest -q -p no:cacheprovider \
+  /tmp/test_zerolab_source_sender_integration.py
+python3 -m py_compile zerolab/sender_config.py zerolab/source_node.py
+bash -n deploy/zerolab-network-config
+git diff --check
+```
+
+The integration test's invalid configuration case must include an empty
+environment value and prove the UDP port remains unbound. Expected: all commands
+exit `0` with no warnings attributable to the changed code.
+
+- [ ] **Step 6: Commit the fail-closed sentinel**
+
+```bash
+git add \
+  zerolab/sender_config.py \
+  tests/test_zerolab_sender_config.py \
+  tests/test_zerolab_network_config.py \
+  deploy/README-zerolab-network.md
+git commit -m "fix: require explicit ZeroLab allow-any sentinel"
+```
+
+- [ ] **Step 7: Repeat Task 4 from Step 1**
+
+Rerun all split-repository and isolated parent-workspace checks against the new
+HEAD. Complete acceptance remains FAIL if systemd normalization can still turn
+an invalid value into allow-all, if `mod.yaml` changed, or if any PICO/ZeroLab
+regression fails.
