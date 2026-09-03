@@ -4,7 +4,7 @@
 
 **Goal:** Let customers configure the allowed ZeroLab sender IPv4 without rebuilding the Mod, while preserving `192.168.89.171` as the default and leaving PICO behavior unchanged.
 
-**Architecture:** Add a standard-library-only resolver that applies an explicit `ZEROLAB_ALLOWED_SENDER` environment override to the manifest sender and validates it fail-closed. Load `/etc/default/zerolab-network` into the manually started hardware service, keep direct/alias handling independent, and document that a stopped/restarted hardware process is required for changes to take effect.
+**Architecture:** Add a standard-library-only resolver that applies an explicit `ZEROLAB_ALLOWED_SENDER` environment override to the manifest sender and validates it fail-closed. Load `/etc/default/zerolab-network` into the manually started hardware service, validate its raw sender assignment in an `ExecStartPre` before systemd can normalize it, keep direct/alias handling independent, and document that a stopped/restarted hardware process is required for changes to take effect.
 
 **Tech Stack:** Python 3.10, `ipaddress`, pytest, systemd drop-ins, Bash-compatible `/etc/default` configuration, YAML manifest verification.
 
@@ -13,6 +13,9 @@
 - Keep `192.168.89.171` as the packaged and manifest default.
 - Only the exact lowercase keyword `ZEROLAB_ALLOWED_SENDER=any` disables source-IP filtering.
 - Reject empty values, IPv6, hostnames, malformed values, and surrounding whitespace; never fall back from invalid input to allow-all.
+- Validate the literal `/etc/default/zerolab-network` sender assignment before
+  systemd normalization; the preflight path must not be redirectable through
+  the same environment file.
 - Do not change UDP destination port `18000` or add source-port authentication.
 - Do not modify `pico_manager`, `smpl_bridge`, `sonic_teleop`, existing PICO events, routes, actions, or ports.
 - Do not start, stop, enable, or disable robot controller services during local implementation or verification.
@@ -34,6 +37,8 @@ step must be rerun.
 - Create `tests/test_zerolab_sender_config.py`: dependency-light unit tests for the resolver.
 - Modify `zerolab/source_node.py`: resolve the effective sender before constructing `ZeroLabUdpReceiver`.
 - Modify `deploy/config/zerolab-network`: package the current sender as the default.
+- Modify `deploy/zerolab-network-config`: expose strict raw-file sender validation
+  for the hardware-service preflight without changing direct/alias behavior.
 - Modify `deploy/systemd/zerolab-hardware.service.d/10-network.conf`: load the optional shared environment file into the manual hardware service.
 - Modify `tests/test_zerolab_network_config.py`: protect the packaged default, drop-in, documentation, and manual-start contract.
 - Modify `deploy/README-zerolab-network.md`: document customer configuration, process-scoped reload behavior, foreground override, and safe mode switching without losing the sender value.
@@ -713,3 +718,333 @@ Rerun all split-repository and isolated parent-workspace checks against the new
 HEAD. Complete acceptance remains FAIL if systemd normalization can still turn
 an invalid value into allow-all, if `mod.yaml` changed, or if any PICO/ZeroLab
 regression fails.
+
+---
+
+### Task 6: Validate the raw sender assignment before systemd normalization
+
+**Files:**
+- Modify: `tests/test_zerolab_network_config.py`
+- Modify: `deploy/zerolab-network-config`
+- Modify: `deploy/systemd/zerolab-hardware.service.d/10-network.conf`
+- Modify: `deploy/README-zerolab-network.md`
+
+**Interfaces:**
+- Consumes: a literal configuration-file path supplied as argument 2 to the
+  existing root-owned helper.
+- Produces: `zerolab-network-config validate-sender CONFIG_FILE`, which exits
+  `0` for a missing file, an absent sender assignment, one exact IPv4
+  assignment, or one exact `ZEROLAB_ALLOWED_SENDER=any` assignment; every
+  malformed, padded, quoted, empty, invalid, or duplicate sender assignment
+  exits `2`.
+- Produces: hardware-service preflight
+  `ExecStartPre=/usr/local/libexec/zerolab-network-config validate-sender /etc/default/zerolab-network`.
+
+- [ ] **Step 1: Add failing raw-file behavior and service-contract tests**
+
+Add the following helpers and tests near the deployment helper tests in
+`tests/test_zerolab_network_config.py`:
+
+```python
+def run_sender_preflight(config: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [str(HELPER), "validate-sender", str(config)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+@pytest.mark.parametrize(
+    "sender_line",
+    [
+        "ZEROLAB_ALLOWED_SENDER=192.168.89.171\n",
+        "ZEROLAB_ALLOWED_SENDER=0.0.0.0\n",
+        "ZEROLAB_ALLOWED_SENDER=255.255.255.255\n",
+        "ZEROLAB_ALLOWED_SENDER=any\n",
+    ],
+)
+def test_sender_preflight_accepts_exact_assignments(tmp_path, sender_line):
+    config = tmp_path / "zerolab-network"
+    config.write_text(
+        "ZEROLAB_NETWORK_MODE=direct\n" + sender_line,
+        encoding="utf-8",
+    )
+
+    result = run_sender_preflight(config)
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_sender_preflight_allows_missing_file_and_absent_assignment(tmp_path):
+    missing = tmp_path / "missing"
+    config = tmp_path / "zerolab-network"
+    config.write_text("ZEROLAB_NETWORK_MODE=direct\n", encoding="utf-8")
+
+    assert run_sender_preflight(missing).returncode == 0
+    assert run_sender_preflight(config).returncode == 0
+
+
+@pytest.mark.parametrize(
+    "sender_line",
+    [
+        "ZEROLAB_ALLOWED_SENDER=\n",
+        "ZEROLAB_ALLOWED_SENDER= \n",
+        "ZEROLAB_ALLOWED_SENDER= any\n",
+        "ZEROLAB_ALLOWED_SENDER=any \n",
+        " ZEROLAB_ALLOWED_SENDER=any\n",
+        "ZEROLAB_ALLOWED_SENDER =any\n",
+        "ZEROLAB_ALLOWED_SENDER='any'\n",
+        'ZEROLAB_ALLOWED_SENDER="any"\n',
+        "ZEROLAB_ALLOWED_SENDER=ANY\n",
+        "ZEROLAB_ALLOWED_SENDER=customer-pc\n",
+        "ZEROLAB_ALLOWED_SENDER=2001:db8::1\n",
+        "ZEROLAB_ALLOWED_SENDER=999.1.1.1\n",
+        "ZEROLAB_ALLOWED_SENDER=01.2.3.4\n",
+        "ZEROLAB_ALLOWED_SENDER=192.168.89.200 \n",
+    ],
+)
+def test_sender_preflight_rejects_non_exact_assignment(tmp_path, sender_line):
+    config = tmp_path / "zerolab-network"
+    config.write_text(sender_line, encoding="utf-8")
+
+    result = run_sender_preflight(config)
+
+    assert result.returncode == 2
+    assert result.stderr == "invalid ZeroLab sender configuration\n"
+
+
+def test_sender_preflight_rejects_duplicate_assignments(tmp_path):
+    config = tmp_path / "zerolab-network"
+    config.write_text(
+        "ZEROLAB_ALLOWED_SENDER=192.168.89.171\n"
+        "ZEROLAB_ALLOWED_SENDER=any\n",
+        encoding="utf-8",
+    )
+
+    result = run_sender_preflight(config)
+
+    assert result.returncode == 2
+    assert result.stderr == "invalid ZeroLab sender configuration\n"
+
+
+def test_sender_preflight_rejects_non_regular_config_path(tmp_path):
+    target = tmp_path / "target"
+    target.write_text(
+        "ZEROLAB_ALLOWED_SENDER=192.168.89.171\n",
+        encoding="utf-8",
+    )
+    symlink = tmp_path / "zerolab-network"
+    symlink.symlink_to(target)
+
+    result = run_sender_preflight(symlink)
+
+    assert result.returncode == 2
+    assert result.stderr == "invalid ZeroLab sender configuration\n"
+```
+
+Extend `test_manual_hardware_service_loads_optional_sender_configuration` with:
+
+```python
+assert (
+    "ExecStartPre=/usr/local/libexec/zerolab-network-config "
+    "validate-sender /etc/default/zerolab-network"
+) in text
+```
+
+Change `test_hardware_drop_in_keeps_network_non_blocking` so it distinguishes
+the permitted preflight from a replacement main command:
+
+```python
+assert "Requires=zerolab-network.service" not in text
+assert not any(
+    line.startswith("ExecStart=") for line in text.splitlines()
+)
+assert (
+    "ExecStartPre=/usr/local/libexec/zerolab-network-config "
+    "validate-sender /etc/default/zerolab-network"
+) in text
+```
+
+- [ ] **Step 2: Run the focused tests and verify RED**
+
+Run:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+python3 -m pytest -q -p no:cacheprovider \
+  tests/test_zerolab_network_config.py -k 'sender_preflight or manual_hardware_service_loads_optional_sender_configuration or hardware_drop_in_keeps_network_non_blocking'
+```
+
+Expected: the raw sender tests fail because `validate-sender` is not a valid
+action, and both hardware drop-in tests fail because `ExecStartPre` is absent.
+
+- [ ] **Step 3: Implement strict raw-file validation in the existing helper**
+
+Replace `usage()` in `deploy/zerolab-network-config` with:
+
+```bash
+usage() {
+    printf 'usage: %s {start|stop|run}\n' "$0" >&2
+    printf '       %s validate-sender CONFIG_FILE\n' "$0" >&2
+}
+```
+
+Add these functions after `valid_ipv4()`:
+
+```bash
+valid_sender_ipv4() {
+    local value=$1
+    local octet
+    local -a octets
+
+    [[ "$value" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+    IFS=. read -r -a octets <<< "$value"
+    [[ ${#octets[@]} -eq 4 ]] || return 1
+    for octet in "${octets[@]}"; do
+        [[ "$octet" = 0 || "$octet" =~ ^[1-9][0-9]{0,2}$ ]] || return 1
+        (( 10#$octet <= 255 )) || return 1
+    done
+}
+
+invalid_sender_config() {
+    printf 'invalid ZeroLab sender configuration\n' >&2
+    return 2
+}
+
+validate_sender_config() {
+    local config_file=$1
+    local line
+    local value
+    local sender_count=0
+
+    if [[ ! -e "$config_file" && ! -L "$config_file" ]]; then
+        return 0
+    fi
+    if [[ ! -f "$config_file" || -L "$config_file" ]]; then
+        invalid_sender_config
+        return $?
+    fi
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$line" =~ ^[[:space:]]*# ]]; then
+            continue
+        fi
+        if [[ "$line" =~ ^[[:space:]]*ZEROLAB_ALLOWED_SENDER($|[[:space:]=]) ]]; then
+            ((sender_count += 1))
+            if [[ $sender_count -ne 1 ]]; then
+                invalid_sender_config
+                return $?
+            fi
+            case "$line" in
+                ZEROLAB_ALLOWED_SENDER=any)
+                    ;;
+                ZEROLAB_ALLOWED_SENDER=*)
+                    value=${line#ZEROLAB_ALLOWED_SENDER=}
+                    if ! valid_sender_ipv4 "$value"; then
+                        invalid_sender_config
+                        return $?
+                    fi
+                    ;;
+                *)
+                    invalid_sender_config
+                    return $?
+                    ;;
+            esac
+        fi
+    done < "$config_file" || {
+        invalid_sender_config
+        return $?
+    }
+}
+```
+
+Before the existing action validation and calls to `validate_mode` and
+`validate_state_dir`, add this early dispatch:
+
+```bash
+if [[ "$ACTION" = validate-sender ]]; then
+    if [[ $# -ne 2 ]]; then
+        usage
+        exit 2
+    fi
+    validate_sender_config "$2"
+    exit $?
+fi
+```
+
+Keep the existing `start`, `stop`, and `run` code paths byte-for-byte except
+for their updated usage text. The validation path must not call any network,
+state-directory, `ip`, `sysctl`, or systemd-notify operation.
+
+- [ ] **Step 4: Add the hardware-service preflight**
+
+Set `deploy/systemd/zerolab-hardware.service.d/10-network.conf` to:
+
+```ini
+[Unit]
+Wants=zerolab-network.service
+After=zerolab-network.service
+
+[Service]
+EnvironmentFile=-/etc/default/zerolab-network
+ExecStartPre=/usr/local/libexec/zerolab-network-config validate-sender /etc/default/zerolab-network
+```
+
+Do not add `ExecStart=`, `[Install]`, `WantedBy=`, `RequiredBy=`, `PartOf=`, or
+`BindsTo=`. This preflight runs only after an operator manually requests the
+hardware service; it must not enable or start the service by itself.
+
+- [ ] **Step 5: Document exact raw syntax and failure behavior**
+
+In the existing `## Sender allowlist` section of
+`deploy/README-zerolab-network.md`, add this operator-facing contract:
+
+```text
+For a systemd hardware launch, the sender assignment is validated from the raw
+configuration file before systemd's EnvironmentFile parsing. Write exactly one
+unquoted assignment with no whitespace around `=` and no leading or trailing
+whitespace. `ZEROLAB_ALLOWED_SENDER=any` is the only allow-all spelling.
+Padded or quoted `any`, an empty value, an invalid IPv4, and duplicate sender
+assignments make the manually requested hardware service fail its pre-start
+check; they never fall back to allow-all. Inspect the reason with
+`systemctl status zerolab-hardware.service` and
+`journalctl -u zerolab-hardware.service` after placing the robot in its safe,
+mechanically supported state.
+```
+
+Do not change the documented PICO flow, direct/alias behavior, destination port
+`18000`, or manual hardware-start procedure.
+
+- [ ] **Step 6: Run focused validation and verify GREEN**
+
+Run:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+python3 -m pytest -q -p no:cacheprovider \
+  tests/test_zerolab_network_config.py -k 'sender_preflight or manual_hardware_service_loads_optional_sender_configuration or hardware_drop_in_keeps_network_non_blocking'
+bash -n deploy/zerolab-network-config
+git diff --check
+```
+
+Expected: all selected tests pass and both static commands exit `0`.
+
+- [ ] **Step 7: Commit the raw preflight**
+
+```bash
+git add \
+  deploy/zerolab-network-config \
+  deploy/systemd/zerolab-hardware.service.d/10-network.conf \
+  deploy/README-zerolab-network.md \
+  tests/test_zerolab_network_config.py
+git commit -m "fix: validate raw ZeroLab sender configuration"
+```
+
+- [ ] **Step 8: Repeat Task 4 against the new head**
+
+Rerun Task 4 Steps 1-6, including the split suite, real local ROS/UDP tests,
+environment-free isolated parent regression with its accepted test-only
+lifecycle-fixture migration, `mod.yaml` identity check, manual-start invariant,
+and final diff review. Physical robot acceptance remains `NOT RUN`; no local
+verification command may operate a controller service or robot hardware.
