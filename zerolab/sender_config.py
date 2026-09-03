@@ -13,8 +13,8 @@ def resolve_allowed_sender(
 ) -> str | None:
     candidate = environ.get(ALLOWED_SENDER_ENV, manifest_sender)
     if not isinstance(candidate, str):
-        raise ValueError("allowed sender must be an IPv4 address or empty")
-    if candidate == "":
+        raise ValueError("allowed sender must be an IPv4 address or 'any'")
+    if candidate == "any":
         return None
     if candidate != candidate.strip():
         raise ValueError("allowed sender must not contain surrounding whitespace")
@@ -22,6 +22,6 @@ def resolve_allowed_sender(
         address = IPv4Address(candidate)
     except ValueError as error:
         raise ValueError(
-            "allowed sender must be an IPv4 address or empty"
+            "allowed sender must be an IPv4 address or 'any'"
         ) from error
     return str(address)

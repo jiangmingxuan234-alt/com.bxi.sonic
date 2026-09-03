@@ -166,15 +166,20 @@ ZEROLAB_ALLOWED_SENDER=192.168.89.171
 ZEROLAB_ALLOWED_SENDER=192.168.89.200
 
 # Explicitly accept any source IP
-ZEROLAB_ALLOWED_SENDER=
+ZEROLAB_ALLOWED_SENDER=any
 ~~~
 
-Choose and retain one explicit line in `/etc/default/zerolab-network`. A
-repeat installation preserves one existing explicit sender line, including an
-intentional empty value; it keeps the packaged default when no sender line
-exists and stops before installation if multiple sender lines are present.
-This is a source-IP filter only: it does not authenticate source ports or
-sender identity. It applies equally in direct and alias modes.
+Only the exact lowercase `any` disables source-IP filtering. Empty and
+whitespace-only values are invalid and fail closed; case variants, hostnames,
+IPv6, malformed values, and values with surrounding whitespace are also
+invalid. Choose and retain one explicit line in
+`/etc/default/zerolab-network`. A repeat installation preserves one existing
+explicit sender line, including `ZEROLAB_ALLOWED_SENDER=any`, byte-for-byte;
+it keeps the packaged default when no sender line exists and stops before
+installation if multiple sender lines are present. Direct/alias mode rewrites
+preserve that same sender line byte-for-byte. This is a source-IP filter only:
+it does not authenticate source ports or sender identity. It applies equally
+in direct and alias modes.
 
 The hardware process reads this configuration when it starts and retains that
 start-time environment. After the existing PD Brake, mechanical-support, and

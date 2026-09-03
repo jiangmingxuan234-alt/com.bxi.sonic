@@ -55,7 +55,7 @@ def test_deployment_install_restarts_an_already_active_network_service():
     "existing_sender_line",
     [
         "ZEROLAB_ALLOWED_SENDER=192.168.89.200\n",
-        "ZEROLAB_ALLOWED_SENDER=\n",
+        "ZEROLAB_ALLOWED_SENDER=any\n",
     ],
 )
 def test_deployment_install_preserves_an_explicit_existing_sender(
@@ -190,6 +190,117 @@ def test_deployment_install_preserves_an_explicit_existing_sender(
     assert result.returncode == 0, result.stderr
     assert existing_config.read_text(encoding="utf-8") == (
         "ZEROLAB_NETWORK_MODE=direct\n" + existing_sender_line
+    )
+
+
+@pytest.mark.parametrize(
+    "sender_line",
+    [
+        "ZEROLAB_ALLOWED_SENDER=192.168.89.200\n",
+        "ZEROLAB_ALLOWED_SENDER=any\n",
+    ],
+)
+def test_deployment_mode_rewrites_preserve_explicit_sender(
+    tmp_path, sender_line
+):
+    text = (ROOT / "deploy/README-zerolab-network.md").read_text(
+        encoding="utf-8"
+    )
+    alias_block = text.split(
+        "Write the explicit alias configuration, then restart the supervisor:",
+        maxsplit=1,
+    )[1].split("~~~bash", maxsplit=1)[1].split("~~~", maxsplit=1)[0]
+    direct_block = text.split("## Switch back to direct", maxsplit=1)[1].split(
+        "~~~bash", maxsplit=1
+    )[1].split("~~~", maxsplit=1)[0]
+
+    install_root = tmp_path / "installed"
+    config = install_root / "etc/default/zerolab-network"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        "ZEROLAB_NETWORK_MODE=direct\n" + sender_line,
+        encoding="utf-8",
+    )
+
+    fake_sudo = tmp_path / "sudo"
+    fake_sudo.write_text(
+        "#!/bin/sh\n"
+        "set -eu\n"
+        "case \"$1\" in\n"
+        "  grep)\n"
+        "    case \"${4:-}\" in\n"
+        "      /etc/default/zerolab-network) set -- \"$1\" \"$2\" \"$3\" \"$INSTALL_ROOT$4\" ;;\n"
+        "    esac\n"
+        "    ;;\n"
+        "  sed)\n"
+        "    case \"${4:-}\" in\n"
+        "      /etc/default/zerolab-network) set -- \"$1\" \"$2\" \"$3\" \"$INSTALL_ROOT$4\" ;;\n"
+        "    esac\n"
+        "    ;;\n"
+        "  tee)\n"
+        "    case \"${2:-}\" in\n"
+        "      /etc/default/zerolab-network) set -- \"$1\" \"$INSTALL_ROOT$2\" ;;\n"
+        "    esac\n"
+        "    ;;\n"
+        "esac\n"
+        "exec \"$@\"\n",
+        encoding="utf-8",
+    )
+    fake_sudo.chmod(0o755)
+    fake_systemctl = tmp_path / "systemctl"
+    fake_systemctl.write_text(
+        "#!/bin/sh\n"
+        "case \"$1\" in\n"
+        "  is-active) printf '%s\\n' active ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    fake_systemctl.chmod(0o755)
+    fake_ip = tmp_path / "ip"
+    fake_ip.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake_ip.chmod(0o755)
+    fake_sysctl = tmp_path / "sysctl"
+    fake_sysctl.write_text("#!/bin/sh\nprintf '%s\\n' 0\n", encoding="utf-8")
+    fake_sysctl.chmod(0o755)
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "INSTALL_ROOT": str(install_root),
+            "PATH": f"{tmp_path}:{env['PATH']}",
+            "ZEROLAB_ALIAS_IP": "10.22.33.44",
+            "ZEROLAB_ETH": "eth-test",
+            "ZEROLAB_WIFI": "wifi-test",
+            "alias_was_present": "absent",
+            "alias_arp_ignore_before": "0",
+        }
+    )
+    alias_result = subprocess.run(
+        ["bash", "-c", alias_block],
+        text=True,
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+    assert alias_result.returncode == 0, alias_result.stderr
+    assert config.read_text(encoding="utf-8") == (
+        "ZEROLAB_NETWORK_MODE=alias\n"
+        + sender_line
+        + "ZEROLAB_ALIAS_IP=10.22.33.44\n"
+        "ZEROLAB_ETH=eth-test\n"
+        "ZEROLAB_WIFI=wifi-test\n"
+    )
+
+    direct_result = subprocess.run(
+        ["bash", "-c", direct_block],
+        text=True,
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+    assert direct_result.returncode == 0, direct_result.stderr
+    assert config.read_text(encoding="utf-8") == (
+        "ZEROLAB_NETWORK_MODE=direct\n" + sender_line
     )
 
 
