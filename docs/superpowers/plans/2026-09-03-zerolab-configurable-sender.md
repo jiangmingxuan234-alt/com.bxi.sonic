@@ -160,55 +160,128 @@ git commit -m "feat: resolve configurable ZeroLab sender"
 
 **Files:**
 - Modify: `zerolab/source_node.py:3-29,659-694`
-- Modify: `tests/test_zerolab_sender_config.py`
+- Test temporarily: `/tmp/test_zerolab_source_sender_integration.py`
 
 **Interfaces:**
 - Consumes: `resolve_allowed_sender(manifest_sender: object, environ: Mapping[str, str]) -> str | None` from Task 1.
 - Produces: `ZeroLabSourceNode` passes the resolved `str | None` to `ZeroLabUdpReceiver(allowed_sender_host=...)` before that receiver opens its UDP socket.
 
-- [ ] **Step 1: Add a failing source-wiring regression test**
+- [ ] **Step 1: Add a failing real source/UDP integration test outside the dirty parent checkout**
 
-Append this AST-based dependency-light test so the split Mod repository does not require constructing robot ROS nodes:
+Create `/tmp/test_zerolab_source_sender_integration.py`. Run it with the Mod
+worktree first on `PYTHONPATH`, followed by the parent workspace's framework
+source. The test constructs the real ROS node, real UDP receiver, and real ZMQ
+publisher; it does not start robot hardware:
 
 ```python
-import ast
 from pathlib import Path
+import socket
+import time
+
+import pytest
+import rclpy
+
+from bxi_example_py_elf3.framework.mod_api import NodeBuildContext
+from zerolab.source_node import ZeroLabSourceNode
 
 
-ROOT = Path(__file__).resolve().parents[1]
+MOD_ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_source_resolves_sender_before_constructing_udp_receiver():
-    tree = ast.parse((ROOT / "zerolab/source_node.py").read_text())
-    calls = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-    ]
-    resolver = next(
-        node for node in calls
-        if isinstance(node.func, ast.Name)
-        and node.func.id == "resolve_allowed_sender"
+def free_port(socket_type):
+    probe = socket.socket(socket.AF_INET, socket_type)
+    try:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+    finally:
+        probe.close()
+
+
+def source_context(udp_port, pose_port):
+    return NodeBuildContext(
+        mod_id="com.bxi.sonic",
+        node_id="com.bxi.sonic/zerolab_sender_test",
+        node_name="zerolab_sender_test",
+        mod_root=MOD_ROOT,
+        params={
+            "udp_bind_host": "127.0.0.1",
+            "udp_port": udp_port,
+            "allowed_sender": "127.0.0.1",
+            "pose_host": "127.0.0.1",
+            "pose_port": pose_port,
+            "pose_topic": "pose",
+            "rate_hz": 50.0,
+            "window_frames": 10,
+            "stale_seconds": 0.5,
+            "jitter_buffer_seconds": 0.04,
+            "short_recovery_blend_seconds": 0.2,
+            "recovery_real_frames": 10,
+            "record_path": "",
+        },
     )
-    receiver = next(
-        node for node in calls
-        if isinstance(node.func, ast.Name)
-        and node.func.id == "ZeroLabUdpReceiver"
+
+
+@pytest.fixture
+def rclpy_runtime():
+    rclpy.init(args=[])
+    yield
+    if rclpy.ok():
+        rclpy.shutdown()
+
+
+def test_environment_override_rejects_manifest_sender(
+    monkeypatch, rclpy_runtime
+):
+    monkeypatch.setenv("ZEROLAB_ALLOWED_SENDER", "127.0.0.2")
+    udp_port = free_port(socket.SOCK_DGRAM)
+    node = ZeroLabSourceNode(
+        source_context(udp_port, free_port(socket.SOCK_STREAM))
     )
-    keyword = next(
-        item for item in receiver.keywords
-        if item.arg == "allowed_sender_host"
-    )
-    assert resolver.lineno < receiver.lineno
-    assert isinstance(keyword.value, ast.Name)
-    assert keyword.value.id == "allowed_sender_host"
+    sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sender.bind(("127.0.0.1", 0))
+        sender.sendto(bytes(992), ("127.0.0.1", udp_port))
+        for _ in range(100):
+            node._receiver.poll()
+            if node._receiver.stats.received:
+                break
+            time.sleep(0.001)
+        assert node._receiver.stats.unexpected_sender == 1
+        assert node._receiver.stats.accepted == 0
+    finally:
+        sender.close()
+        node.destroy_node()
+
+
+def test_invalid_override_does_not_open_udp_socket(
+    monkeypatch, rclpy_runtime
+):
+    monkeypatch.setenv("ZEROLAB_ALLOWED_SENDER", "customer-pc")
+    udp_port = free_port(socket.SOCK_DGRAM)
+    with pytest.raises(ValueError, match="allowed sender"):
+        ZeroLabSourceNode(
+            source_context(udp_port, free_port(socket.SOCK_STREAM))
+        )
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.bind(("127.0.0.1", udp_port))
+    finally:
+        probe.close()
 ```
 
 - [ ] **Step 2: Run the focused test and verify RED**
 
-Run the Task 1 Step 2 command.
+Run:
 
-Expected: FAIL because `source_node.py` has no `resolve_allowed_sender` call.
+```bash
+PYTHONPATH="$PWD:/home/fazepurple/ros2_ws/bxi_rl_controller_ros2_example_dev/src/bxi_example_py_elf3" \
+PYTHONDONTWRITEBYTECODE=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+python3 -m pytest -q -p no:cacheprovider \
+  /tmp/test_zerolab_source_sender_integration.py
+```
+
+Expected: the first test fails because the manifest sender is still accepted,
+and the second test fails because the hostname is not rejected.
 
 - [ ] **Step 3: Wire the resolver before receiver construction**
 
@@ -224,12 +297,21 @@ Add the relative import alongside the existing ZeroLab imports:
 from .sender_config import resolve_allowed_sender
 ```
 
-Resolve before `ZeroLabUdpReceiver` is called:
+Resolve immediately after parameter validation and before the ROS node or UDP
+receiver is constructed:
 
 ```python
+params = validate_source_params(
+    context.params, mod_root=context.mod_root
+)
 allowed_sender_host = resolve_allowed_sender(
     params["allowed_sender"], os.environ
 )
+super().__init__(
+    context.node_name, namespace=context.namespace or None
+)
+
+# Later, inside the existing guarded resource construction:
 self._receiver = ZeroLabUdpReceiver(
     bind_host=str(params["udp_bind_host"]),
     port=int(params["udp_port"]),
@@ -245,10 +327,14 @@ Do not catch the resolver's `ValueError`; initialization must stop before the re
 PYTHONDONTWRITEBYTECODE=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
 python3 -m pytest -q -p no:cacheprovider \
   tests/test_zerolab_sender_config.py
+PYTHONPATH="$PWD:/home/fazepurple/ros2_ws/bxi_rl_controller_ros2_example_dev/src/bxi_example_py_elf3" \
+PYTHONDONTWRITEBYTECODE=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+python3 -m pytest -q -p no:cacheprovider \
+  /tmp/test_zerolab_source_sender_integration.py
 python3 -m py_compile zerolab/sender_config.py zerolab/source_node.py
 ```
 
-Expected: all sender tests pass and both modules compile.
+Expected: all sender unit and integration tests pass and both modules compile.
 
 - [ ] **Step 5: Commit source integration**
 
@@ -297,21 +383,6 @@ def test_manual_hardware_service_loads_optional_sender_configuration():
     assert "EnvironmentFile=-/etc/default/zerolab-network" in text
 
 
-def test_deployment_guide_documents_configurable_sender():
-    text = (ROOT / "deploy/README-zerolab-network.md").read_text()
-    required = [
-        "ZEROLAB_ALLOWED_SENDER=192.168.89.171",
-        "ZEROLAB_ALLOWED_SENDER=192.168.89.200",
-        "ZEROLAB_ALLOWED_SENDER=",
-        "source IP",
-        "source port",
-        "restart zerolab-hardware.service",
-        "does not apply",
-        "direct and alias",
-        "ros2 launch",
-    ]
-    for item in required:
-        assert item in text
 ```
 
 Extend `test_deployment_preserves_manual_hardware_startup` to assert the added
@@ -327,7 +398,8 @@ python3 -m pytest -q -p no:cacheprovider \
   tests/test_zerolab_network_config.py
 ```
 
-Expected: FAIL because the packaged sender, hardware `EnvironmentFile`, and sender documentation are absent.
+Expected: FAIL because the packaged sender and hardware `EnvironmentFile` are
+absent.
 
 - [ ] **Step 3: Add the packaged default and environment-file loading**
 
