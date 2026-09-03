@@ -6,6 +6,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import math
 import operator
+import os
 from pathlib import Path
 import time
 
@@ -24,6 +25,7 @@ from .recording import (
     RawRecordingWriter,
     build_recording_metadata,
 )
+from .sender_config import resolve_allowed_sender
 from .timeline import BurstTimelineReconstructor
 from .udp_receiver import ZeroLabUdpReceiver
 
@@ -38,7 +40,7 @@ else:
 SOURCE_DEFAULTS: dict[str, object] = {
     "udp_bind_host": "0.0.0.0",
     "udp_port": 18000,
-    "allowed_sender": "",
+    "allowed_sender": "192.168.89.171",
     "pose_host": "127.0.0.1",
     "pose_port": 5558,
     "pose_topic": "pose",
@@ -660,6 +662,9 @@ class ZeroLabSourceNode(Node):
         params = validate_source_params(
             context.params, mod_root=context.mod_root
         )
+        allowed_sender_host = resolve_allowed_sender(
+            params["allowed_sender"], os.environ
+        )
         super().__init__(
             context.node_name, namespace=context.namespace or None
         )
@@ -686,11 +691,10 @@ class ZeroLabSourceNode(Node):
         self._destroy_result = True
 
         try:
-            allowed_sender = str(params["allowed_sender"])
             self._receiver = ZeroLabUdpReceiver(
                 bind_host=str(params["udp_bind_host"]),
                 port=int(params["udp_port"]),
-                allowed_sender_host=allowed_sender or None,
+                allowed_sender_host=allowed_sender_host,
             )
             self._converter = ZeroLabMotionConverter()
             self._core = ZeroLabSourceCore(
