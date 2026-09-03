@@ -453,6 +453,13 @@ def test_sender_preflight_rejects_unreadable_regular_config_path():
     assert result.stderr == "invalid ZeroLab sender configuration\n"
 
 
+def test_sender_preflight_rejects_post_open_read_failure():
+    result = run_sender_preflight(Path("/proc/self/mem"))
+
+    assert result.returncode == 2
+    assert result.stderr == "invalid ZeroLab sender configuration\n"
+
+
 def test_manual_hardware_service_loads_optional_sender_configuration():
     text = (
         ROOT / "deploy/systemd/zerolab-hardware.service.d/10-network.conf"

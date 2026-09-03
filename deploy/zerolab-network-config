@@ -130,10 +130,10 @@ invalid_sender_config() {
 
 validate_sender_config() {
     local config_file=$1
+    local config_contents
     local line
     local value
     local sender_count=0
-    local invalid=0
 
     if [[ ! -e "$config_file" && ! -L "$config_file" ]]; then
         return 0
@@ -142,7 +142,10 @@ validate_sender_config() {
         invalid_sender_config
         return $?
     fi
-    line=
+    if ! config_contents=$(cat -- "$config_file" 2>/dev/null); then
+        invalid_sender_config
+        return $?
+    fi
     while IFS= read -r line || [[ -n "$line" ]]; do
         if [[ "$line" =~ ^[[:space:]]*# ]]; then
             continue
@@ -150,8 +153,8 @@ validate_sender_config() {
         if [[ "$line" =~ ^[[:space:]]*ZEROLAB_ALLOWED_SENDER($|[[:space:]=]) ]]; then
             ((sender_count += 1))
             if [[ $sender_count -ne 1 ]]; then
-                invalid=1
-                break
+                invalid_sender_config
+                return $?
             fi
             case "$line" in
                 ZEROLAB_ALLOWED_SENDER=any)
@@ -159,24 +162,17 @@ validate_sender_config() {
                 ZEROLAB_ALLOWED_SENDER=*)
                     value=${line#ZEROLAB_ALLOWED_SENDER=}
                     if ! valid_sender_ipv4 "$value"; then
-                        invalid=1
-                        break
+                        invalid_sender_config
+                        return $?
                     fi
                     ;;
                 *)
-                    invalid=1
-                    break
+                    invalid_sender_config
+                    return $?
                     ;;
             esac
         fi
-    done 2>/dev/null < "$config_file" || {
-        invalid_sender_config
-        return $?
-    }
-    if [[ $invalid -ne 0 ]]; then
-        invalid_sender_config
-        return $?
-    fi
+    done <<< "$config_contents"
 }
 
 valid_interface() {
